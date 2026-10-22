@@ -1,0 +1,18 @@
+# 统一换行，避免 Windows/Linux 交叉提交产生噪声 diff
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# 二进制资产不做换行转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.pt    binary
+*.onnx  binary
+*.pth   binary
