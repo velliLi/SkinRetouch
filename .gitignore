@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+
+# YOLO 运行时缓存（写入本机绝对路径）
+.yolo/
+
+# 模型权重：不入库，README 已说明从 ComfyUI/models/ultralytics 取用
+models/*.pt
+models/*.onnx
+models/*.pth
+
+# 测试产物与中间图
+tests/output/
+tests/assets/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
