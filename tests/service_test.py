@@ -49,8 +49,12 @@ def free_port() -> int:
 
 
 def run(*args: str) -> subprocess.CompletedProcess:
+    # --no-repaint-autostart on every call: the switch would otherwise spawn a
+    # real ComfyUI and load a 6.9 GB checkpoint just to prove it can start a
+    # service, which is minutes of test time for a feature covered by
+    # server_test.py and tests/probe_engine.py.
     return subprocess.run(
-        [sys.executable, SERVICE, *[str(item) for item in args]],
+        [sys.executable, SERVICE, *[str(item) for item in args], "--no-repaint-autostart"],
         capture_output=True,
         text=True,
         encoding="utf-8",

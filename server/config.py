@@ -188,9 +188,14 @@ class Config:
     queue_limit: int = 8
     data_dir: str = ""
     # Where the optional repaint pass looks for ComfyUI. Empty means "use
-    # server.repaint.DEFAULT_URL", which honours SKIN_REPAINT_URL. Only probed
-    # when a job actually asks for repaint, never at startup.
+    # server.repaint.DEFAULT_URL", which honours SKIN_REPAINT_URL.
     repaint_url: str = ""
+    # Keeping the engine warm. `repaint_autostart` spawns a private ComfyUI when
+    # nothing answers on `repaint_url`; an instance the user already runs is
+    # reused and never taken over.
+    repaint_autostart: bool = False
+    comfyui_dir: str = ""
+    comfyui_python: str = ""
     verbose: bool = False
     settings: dict = field(default_factory=dict)
 

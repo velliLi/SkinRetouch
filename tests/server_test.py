@@ -151,6 +151,33 @@ def main():
         check("--repaint-url is accepted",
               args.repaint_url.rstrip("/") == "http://127.0.0.1:9999", args.repaint_url)
 
+        # -- engine control -------------------------------------------------
+        status, _, raw = call(base, "/api/repaint/engine")
+        engine = payload(raw)
+        check("engine endpoint reports its state",
+              status == 200 and engine.get("state") in ("idle", "starting", "ready", "failed")
+              and isinstance(engine.get("available"), bool),
+              (status, engine))
+        check("engine is never managed until we start one",
+              engine.get("managed") is False, engine)
+
+        status, _, raw = call(base, "/api/repaint/engine", method="POST",
+                              data=b'{"action": "explode"}',
+                              headers={"Content-Type": "application/json"})
+        body = payload(raw)
+        message = ((body.get("error") or {}).get("message") or body.get("message") or "")
+        check("a bad engine action is rejected",
+              status == 400 and "action" in message, (status, body))
+
+        # stop is a no-op on an engine this process does not own; the important
+        # part is that it answers and never kills someone else's ComfyUI.
+        status, _, raw = call(base, "/api/repaint/engine", method="POST",
+                              data=b'{"action": "stop"}',
+                              headers={"Content-Type": "application/json"})
+        body = payload(raw)
+        check("stop answers without touching a foreign engine",
+              status == 200 and body.get("managed") is False, (status, body))
+
         status, headers, raw = call(base, "/", token="")
         check("index page is served", status == 200 and b"Skin" in raw,
               headers.get("Content-Type"))

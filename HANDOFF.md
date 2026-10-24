@@ -100,6 +100,9 @@ $env:SKIN_DEVICE="cuda"   # 或 cpu
 - **收益有据**：先用 `skin_retouch` 磨皮、再补一过重绘，瑕疵区残差 6.20 → 4.53、高频能量 6.57 → 4.44（真值掩膜，`tests/probe_hit_check.py`）。
 
 落地形态：网页服务的 `repaint` 开关，默认 `False`，只在 CPU 磨皮之后追加一过，掩膜由 `server/repaint.py` 自动检测（红通道窄带通 + 分位阈值）。**ComfyUI 不在线就跳过并写警告，绝不让任务失败。**
+
+引擎由 `server/engine.py` 管理，服务启动时自动待命（`--repaint-autostart`，默认开）：`repaint_url`（默认 `http://127.0.0.1:8188`，ComfyUI 的默认端口）上已有实例就直接复用、绝不接管也不关闭；没有才 spawn 私有 ComfyUI（`--comfyui-dir` / `--comfyui-python` 可指定），日志落 `<data-dir>/comfyui.log`，服务退出时一并回收。页面「重绘」组标题旁有状态点与启停按钮，走 `GET|POST /api/repaint/engine`；`start` 立刻返回 `starting`，前端轮询到 `ready`。实测待命 27.2 秒（含 6.9 GB checkpoint 加载），stop/start 往返 22.6 秒，单块重绘首块约 33 秒、后续 12–24 秒。**不能用 `Popen` 之外的粗暴方式杀 ComfyUI**：`stop()` 只在 `managed`（自己 spawn 的）为真时动手，否则显示「占用中」。
+
 **目前最大的空白：人脸身份漂移没有量化。** 本机 `~/.insightface/models` 为空（无 ArcFace 权重）、也没有 `lpips`/`pyiqa`，只有"掩膜外漂移 4.06 ≈ 纯 VAE 往返误差"这个代理证据，和 5 倍放大图的肉眼判断。要下"重绘不会改身份"的结论，得先补测量手段。
 
 **2. 不用 mediapipe / face mesh。**
@@ -387,7 +390,7 @@ E:\SkinRetouch\
     blemish_test.py      注入瑕疵再还原，CPU 脸路径回归基线（带断言）
     node_test.py         节点输入输出契约
     compare_paths.py     CPU / GPU 两条路径的一致性预算
-    server_test.py       本地服务 HTTP 端到端自检（54 项断言，随机端口自起自停）
+    server_test.py       本地服务 HTTP 端到端自检（58 项断言，随机端口自起自停）
     repaint_test.py      局部重绘自检（15 项断言，引擎不在线时跳过在线部分）
     service_test.py      一键开关起停自检（37 项断言，临时数据目录里真起真杀）
     deliver_demo.py      成品对比图
@@ -408,7 +411,8 @@ E:\SkinRetouch\
     store.py             任务落盘、magic bytes 嗅探扩展名、TTL 清理
     jobs.py              单 worker 串行队列、core_kwargs 参数映射、PNG/JPEG 编码、meta.json
     repaint.py           SDXL 9 通道 inpaint 客户端：掩膜检测、分块规划、alpha 融合、降级
-    api.py               http.server 路由、鉴权、CORS、三种上传体、SSE
+    engine.py            重绘引擎的生死：探活、复用外部实例、按需拉起私有 ComfyUI、退出回收
+    api.py               http.server 路由、鉴权、CORS、三种上传体、SSE、引擎启停
     webui/               index.html / app.css / app.js / favicon.svg（无构建步骤）
   server/data/           运行时任务目录（.gitignore，可随时删）
 ```

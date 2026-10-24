@@ -278,6 +278,39 @@ body::before {
   background: linear-gradient(90deg, var(--line), transparent);
 }
 
+/* The repaint group owns a GPU engine the user starts and stops, so its state
+   hangs off the heading. `order` keeps the rule between label and chip. */
+.engine {
+  order: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.engine-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4a565f;
+}
+.engine[data-state="ready"] .engine-dot { background: var(--ok); box-shadow: 0 0 8px rgba(111, 168, 124, 0.6); }
+.engine[data-state="starting"] .engine-dot { background: var(--amber); animation: pulse 1.4s ease-in-out infinite; }
+.engine[data-state="failed"] .engine-dot { background: #c2685f; }
+.engine-btn {
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.engine-btn:hover:not(:disabled) { color: var(--amber-hi); border-color: var(--amber); }
+.engine-btn:disabled { opacity: 0.5; cursor: default; }
+
 .param { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 
 .param-top { display: flex; align-items: baseline; gap: 8px; }

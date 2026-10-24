@@ -255,18 +255,115 @@
   function noteRepaint() {
     const row = el.params.querySelector('[data-key="repaint"]');
     if (!row) return;
-    const engine = state.repaint;
-    const available = !!(engine && engine.available);
+    const engine = state.repaint || {};
+    const available = !!engine.available;
     row.dataset.unavailable = available ? "0" : "1";
     const hint = row.querySelector(".param-hint");
     if (hint) {
-      hint.textContent = available
-        ? "把痘点真正重画一遍而不是抹平，每块约 10 秒。与磨皮叠加效果最好。"
-        : "引擎未就绪：" + ((engine && engine.url) || "ComfyUI") + " 上没有响应，勾选会被跳过。";
+      if (available) {
+        hint.textContent = "把痘点真正重画一遍而不是抹平，每块约 10 秒。与磨皮叠加效果最好。";
+      } else if (engine.state === "starting") {
+        hint.textContent = "引擎正在启动，模型加载完就能勾选。";
+      } else {
+        hint.textContent = "引擎未就绪："
+          + (engine.spawnable === false
+            ? (engine.detail || "找不到 ComfyUI，用 --comfyui-dir 指定")
+            : (engine.url || "ComfyUI") + " 上没有响应，可点上方「启动」。");
+      }
     }
     for (const key of ["repaint_denoise", "repaint_steps"]) {
       const other = el.params.querySelector(`[data-key="${key}"]`);
       if (other) other.dataset.unavailable = available ? "0" : "1";
+    }
+    renderEngine();
+  }
+
+  /* --------------------------------------------------- repaint engine chip */
+
+  const engineUI = { node: null, btn: null };
+
+  function engineControl() {
+    const wrap = document.createElement("span");
+    wrap.className = "engine";
+    const dot = document.createElement("i");
+    dot.className = "engine-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "engine-btn";
+    btn.addEventListener("click", toggleEngine);
+    wrap.append(dot, btn);
+    engineUI.node = wrap;
+    engineUI.btn = btn;
+    return wrap;
+  }
+
+  // The chip reads the same status the health poll uses, so a ComfyUI started
+  // outside this page also shows up here without a reload.
+  function renderEngine() {
+    const wrap = engineUI.node;
+    if (!wrap) return;
+    const engine = state.repaint || {};
+    const key = engine.available ? "ready" : (engine.state || "idle");
+    wrap.dataset.state = key;
+    wrap.title = engine.detail || engine.url || "";
+    const btn = engineUI.btn;
+    if (key === "starting") {
+      btn.textContent = "启动中…";
+      btn.disabled = true;
+    } else if (key === "ready") {
+      btn.textContent = engine.managed ? "停止" : "占用中";
+      btn.disabled = !engine.managed;  // never stop someone else's ComfyUI
+    } else if (engine.spawnable === false) {
+      btn.textContent = "不可用";
+      btn.disabled = true;
+    } else {
+      btn.textContent = key === "failed" ? "重试" : "启动";
+      btn.disabled = false;
+    }
+  }
+
+  async function toggleEngine() {
+    const engine = state.repaint || {};
+    const action = engine.available && engine.managed ? "stop" : "start";
+    engineUI.btn.disabled = true;
+    try {
+      state.repaint = await api("/api/repaint/engine", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      renderEngine();
+      noteRepaint();
+      if (action === "start" && state.repaint && state.repaint.state === "starting") {
+        toast("正在启动重绘引擎，首次加载模型约 1 分钟。");
+        pollEngine();
+      } else if (action === "stop") {
+        toast("重绘引擎已停止。");
+      }
+    } catch (err) {
+      toast("引擎操作失败：" + err.message);
+    } finally {
+      renderEngine();
+    }
+  }
+
+  // Loading a 6.9 GB checkpoint takes a while; keep asking so the chip turns
+  // green on its own instead of waiting for the next slow health poll.
+  async function pollEngine() {
+    for (let i = 0; i < 150; i += 1) {
+      await sleep(2000);
+      try {
+        state.repaint = await api("/api/repaint/engine");
+      } catch {
+        return;
+      }
+      renderEngine();
+      noteRepaint();
+      if (!state.repaint || state.repaint.state !== "starting") {
+        if (state.repaint && state.repaint.available) toast("重绘引擎已就绪。");
+        return;
+      }
     }
   }
 
@@ -313,7 +410,12 @@
         lastGroup = spec.group;
         const title = document.createElement("div");
         title.className = "group-title";
-        title.textContent = spec.group;
+        const label = document.createElement("span");
+        label.textContent = spec.group;
+        title.appendChild(label);
+        // The repaint group owns a GPU engine that has to be started and can be
+        // stopped again; its state belongs on the heading, not in a paragraph.
+        if (spec.group === "重绘") title.appendChild(engineControl());
         el.params.appendChild(title);
       }
       el.params.appendChild(rowFor(spec));

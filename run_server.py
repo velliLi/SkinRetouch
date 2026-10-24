@@ -24,7 +24,6 @@ import webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from server import VERSION  # noqa: E402
-from server import repaint  # noqa: E402
 from server.api import create_server  # noqa: E402
 from server.config import DEFAULT_PREVIEW_MAX_PX, Config, new_token  # noqa: E402
 
@@ -65,7 +64,18 @@ def parse_args(argv=None):
     parser.add_argument("--max-upload-mb", type=int, default=128, help="upload size ceiling")
     parser.add_argument("--repaint-url", default="",
                         help="ComfyUI base URL for the optional repaint pass "
-                             "(default: $SKIN_REPAINT_URL or http://127.0.0.1:8189)")
+                             "(default: $SKIN_REPAINT_URL or http://127.0.0.1:8188)")
+    parser.add_argument("--repaint-autostart", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="keep the repaint engine warm: reuse a ComfyUI that "
+                             "already answers on --repaint-url, otherwise start a "
+                             "private one (--no-repaint-autostart to opt out)")
+    parser.add_argument("--comfyui-dir", default="",
+                        help="directory containing ComfyUI's main.py, needed only "
+                             "when the console has to start the engine itself")
+    parser.add_argument("--comfyui-python", default="",
+                        help="interpreter to run ComfyUI with (default: the "
+                             "embedded one next to --comfyui-dir)")
     parser.add_argument("--allow-origin", default="",
                         help="echo this Origin in CORS headers (off by default)")
     parser.add_argument("--open", action="store_true", dest="open_browser",
@@ -99,6 +109,20 @@ def lan_address() -> str:
         return ""
 
 
+def engine_note(status: dict, autostart: bool) -> str:
+    """One banner line answering "can the repaint pass run right now?"."""
+    if status.get("available"):
+        if status.get("managed"):
+            return "standby (private instance, closed when this console exits)"
+        return "standby (reusing the instance already running)"
+    if not autostart:
+        return "idle (--no-repaint-autostart)"
+    detail = status.get("detail") or ""
+    if detail:
+        return "idle: %s" % (detail,)
+    return "idle: nothing answering on %s" % (status.get("url", ""),)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     host = "0.0.0.0" if args.lan else args.host
@@ -122,6 +146,9 @@ def main(argv=None) -> int:
         queue_limit=max(1, args.queue),
         data_dir=args.data_dir,
         repaint_url=args.repaint_url.rstrip("/"),
+        repaint_autostart=bool(args.repaint_autostart),
+        comfyui_dir=args.comfyui_dir,
+        comfyui_python=args.comfyui_python,
         verbose=args.verbose,
     )
 
@@ -161,9 +188,13 @@ def main(argv=None) -> int:
     else:
         say("  auth      %s" % note)
     say("  data      %s" % cfg.resolved_data_dir())
-    engine = cfg.repaint_url or repaint.DEFAULT_URL
-    say("  repaint   %s  %s" % (engine, "ready" if repaint.probe(engine, timeout=0.4)
-                               else "idle (start ComfyUI there to enable 局部重绘)"))
+    say("  repaint   %s" % server.engine.url)
+    status = server.engine.status()
+    if cfg.repaint_autostart and not status["available"] and status["spawnable"]:
+        say("            warming up: starting a private ComfyUI "
+            "(first run loads a 6.9 GB checkpoint)")
+        status = server.engine.start()
+    say("            %s" % engine_note(status, cfg.repaint_autostart))
     say("  stop      Ctrl+C")
     say()
 
@@ -178,6 +209,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         print("\n[server] stopping", flush=True)
     finally:
+        server.engine.shutdown()
         server.manager.shutdown()
         server.server_close()
     return 0

@@ -311,6 +311,16 @@ def start(args) -> int:
         argv += ["--verbose"]
     if args.data_dir:
         argv += ["--data-dir", data_dir]
+    # The repaint engine is warm by default; passing the opt-out through keeps
+    # `服务开关.bat` users able to reclaim the VRAM without editing anything.
+    if args.repaint_url:
+        argv += ["--repaint-url", args.repaint_url.rstrip("/")]
+    if not args.repaint_autostart:
+        argv += ["--no-repaint-autostart"]
+    if args.comfyui_dir:
+        argv += ["--comfyui-dir", args.comfyui_dir]
+    if args.comfyui_python:
+        argv += ["--comfyui-python", args.comfyui_python]
 
     os.makedirs(data_dir, exist_ok=True)
     logfile = log_path(data_dir)
@@ -513,8 +523,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not open the browser after starting")
     parser.add_argument("--yes", "-y", action="store_true", help="skip the stop confirmation")
     parser.add_argument("--verbose", action="store_true", help="pass --verbose to the server")
+    parser.add_argument("--repaint-url", default="",
+                        help="ComfyUI base URL for the optional repaint pass")
+    parser.add_argument("--no-repaint-autostart", action="store_false", dest="repaint_autostart",
+                        help="do not keep a ComfyUI waiting for the repaint pass "
+                             "(saves ~2 GB of VRAM, the page can still start it)")
+    parser.add_argument("--comfyui-dir", default="",
+                        help="ComfyUI directory, needed when the service starts it itself")
+    parser.add_argument("--comfyui-python", default="",
+                        help="interpreter that can run ComfyUI")
     parser.add_argument("--lines", type=int, default=30, help="log lines for the logs command")
-    parser.set_defaults(open_browser=True)
+    parser.set_defaults(open_browser=True, repaint_autostart=True)
     return parser
 
 

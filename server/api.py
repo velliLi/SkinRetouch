@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import config, repaint
 from .config import BadParams, Config, JOB_ID_RE, VERSION, coerce_params, parse_query_params
+from .engine import Engine
 from .jobs import JobManager, JobNotFound, QueueFull
 from .store import JobStore, StoreError
 
@@ -418,6 +419,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, self.cfg.serve_schema())
         if tail == ["login"] and method == "POST":
             return self._login()
+        if tail == ["repaint", "engine"]:
+            if method == "GET":
+                return self._json(200, self.server.engine.status())  # type: ignore[attr-defined]
+            if method == "POST":
+                return self._engine_command()
 
         if not tail or tail[0] != "jobs":
             raise HttpError(404, "not_found", "no such endpoint: %s" % (path,))
@@ -478,6 +484,29 @@ class Handler(BaseHTTPRequestHandler):
                 },
             })
         self._json(200, payload)
+
+    def _engine_command(self):
+        """Start or stop the local ComfyUI behind the repaint pass.
+
+        `start` returns immediately with state `starting`; the page polls
+        `GET /api/repaint/engine` because loading SDXL takes tens of seconds and
+        holding the request open would just look like a hang.
+        """
+        raw = self._read_body()
+        payload = {}
+        if raw:
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise BadParams('body must be JSON like {"action": "start"}')
+            if not isinstance(payload, dict):
+                raise BadParams('body must be a JSON object like {"action": "start"}')
+        action = str(payload.get("action") or "").strip().lower()
+        if action == "start":
+            return self._json(200, self.server.engine.start(wait=False))  # type: ignore[attr-defined]
+        if action == "stop":
+            return self._json(200, self.server.engine.stop())  # type: ignore[attr-defined]
+        raise BadParams("action must be 'start' or 'stop'")
 
     def _login(self):
         if not self.cfg.token:
@@ -661,15 +690,18 @@ class SkinHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, cfg: Config, manager: JobManager, store: JobStore, log):
+    def __init__(self, address, cfg: Config, manager: JobManager, store: JobStore, log,
+                 engine: Engine | None = None):
         self.cfg = cfg
         self.manager = manager
         self.store = store
         self.log = log
+        self.engine = engine or Engine(url=cfg.repaint_url or repaint.DEFAULT_URL,
+                                       data_dir=cfg.resolved_data_dir())
         self.started_at = time.time()
         self.login_attempts = {}
         self._caps = None
-        self._repaint_probe = {"at": 0.0, "ok": False, "url": ""}
+        self._repaint_probe = {"at": 0.0, "status": {}}
         super().__init__(address, Handler)
 
     def repaint_probe(self) -> dict:
@@ -681,12 +713,9 @@ class SkinHTTPServer(ThreadingHTTPServer):
         polls.
         """
         now = time.time()
-        if now - self._repaint_probe["at"] > 5.0:
-            url = self.cfg.repaint_url or repaint.DEFAULT_URL
-            self._repaint_probe = {"at": now, "ok": repaint.probe(url, timeout=0.4),
-                                   "url": url}
-        return {"available": bool(self._repaint_probe["ok"]),
-                "url": self._repaint_probe["url"]}
+        if now - self._repaint_probe["at"] > 3.0:
+            self._repaint_probe = {"at": now, "status": self.engine.status()}
+        return dict(self._repaint_probe["status"])
 
     def caps(self) -> dict:
         """Environment facts the UI shows in the footer; probed once."""
@@ -727,4 +756,11 @@ def create_server(cfg: Config, log=None):
     log = log or (lambda message: print(message, flush=True))
     store = JobStore(cfg.resolved_data_dir())
     manager = JobManager(cfg, store, log)
-    return SkinHTTPServer((cfg.host, cfg.port), cfg, manager, store, log)
+    engine = Engine(
+        url=cfg.repaint_url or repaint.DEFAULT_URL,
+        comfyui_dir=cfg.comfyui_dir,
+        python=cfg.comfyui_python,
+        autostart=cfg.repaint_autostart,
+        data_dir=cfg.resolved_data_dir(),
+    )
+    return SkinHTTPServer((cfg.host, cfg.port), cfg, manager, store, log, engine)

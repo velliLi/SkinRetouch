@@ -345,3 +345,43 @@ E:\comfyui\python_embeded\python.exe tests/probe_repaint_zoom.py
 midband 信号，与天然肤色不均本来就难分。真实痘点更锐利，理论上更好检，但手上两张
 20 MP 真片都过于干净（第 5 节、第 9 节），测不出上限。**要往下推，缺的是一张真有
 瑕疵的原片，不是更复杂的算法。**
+
+## 12. 引擎待命：从「要你先开 ComfyUI」到「服务自己管」
+
+第 11 节的形态有个操作层面的硬伤：重绘需要一个跑着的 ComfyUI，而它不会自己出现。
+一个勾选框配一句"需要 ComfyUI"，等于把启动、等待、关停三件事全丢给使用者。第 12 节
+把这件事收进服务里。
+
+### 12.1 三条路径，优先级明确
+
+`server/engine.py` 的 `Engine` 只有一条判断链，越靠前越优先：
+
+1. **`repaint_url` 上已有实例在应答** → 直接复用。`managed` 保持 `False`，`stop()` 什么都不做，
+   页面按钮显示「占用中」。这是别人的进程，任何情况下都不能接管或关闭。
+2. **自己 spawn 过且进程还活着** → `managed=True`，按钮变「停止」，可以正常关。
+3. **都没有** → `idle`。`--repaint-autostart`（默认开）时启动阶段就走到这里 spawn；
+   关闭时留在 `idle`，等页面按钮或 API 触发。
+
+判据是 `repaint.probe()`（GET `/system_stats`），和真正跑重绘时用的是同一个探活函数，
+不存在"探活通过但推理连不上"的错位。
+
+### 12.2 实测时间
+
+| 动作 | 耗时 | 说明 |
+|---|---|---|
+| 冷启动到 `ready` | **27.2 s** | spawn → 加载 6.9 GB checkpoint → 应答 `/system_stats` |
+| `stop` → `idle` | < 2 s | terminate + 等 15 s 上限 |
+| `stop` → `start` → `ready` | **22.6 s** | 进程还热，比首次快 |
+| `--no-repaint-autostart` 下点「启动」 | **38.0 s** | 服务本身没预热，冷一些 |
+| 单块重绘（引擎已待命） | 12–24 s | 首块 32.7 s，含把 checkpoint 搬进 VRAM |
+| 整个 job（2 块 + 磨皮） | 64.6 s | `pipeline_ms 7440` + `repaint_ms 56349` |
+
+最后两行值得放在一起看：**待命时间是一次性的，重绘时间才是每张图的成本。** 27 秒的
+代价换来的是后面每张图省掉冷启动那句"等 30 秒"，这个交易只有把服务开一整天时成立。
+
+### 12.3 唯一需要小心的地方
+
+`stop()` 必须只杀自己 spawn 的。`_proc` 为空或已退出时 `managed` 为 `False`，此时
+`stop()` 直接返回当前状态，不发任何信号。这条约束在 `tests/server_test.py` 里被钉住
+（`engine is never managed until we start one`、`stop answers without touching a foreign
+engine`），因为误杀用户自己开着的 ComfyUI 是不可接受的副作用，比功能缺失严重得多。

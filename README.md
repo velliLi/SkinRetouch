@@ -174,7 +174,7 @@ E:\SkinRetouch\
     blemish_test.py      注入已知瑕疵再还原的对照实验（带基线断言）
     node_test.py         节点输入输出契约
     compare_paths.py     CPU / GPU 两条路径的一致性预算
-    server_test.py       本地服务的 HTTP 端到端自检（54 项断言）
+    server_test.py       本地服务的 HTTP 端到端自检（58 项断言）
     repaint_test.py      局部重绘的自检（15 项断言，引擎不在线时自动跳过在线部分）
     service_test.py      一键开关的起停端到端自检（37 项断言）
     deliver_demo.py      成品对比图
@@ -190,6 +190,7 @@ E:\SkinRetouch\
     __init__.py          把项目根挂进 sys.path，导出 serve()
     config.py            参数表、预设、Config（13 个参数的单一事实源）
     repaint.py           SDXL 9 通道 inpaint 的客户端：掩膜检测、分块、融合
+    engine.py            重绘引擎的生死：探测、复用、按需拉起私有 ComfyUI
     store.py             任务落盘、magic bytes 嗅探、TTL 清理
     jobs.py              单 worker 串行队列、结果编码、meta.json
     api.py               http.server 路由、令牌鉴权、三种上传体
@@ -223,6 +224,8 @@ New-Item -ItemType Junction -Path E:\comfyui\ComfyUI\custom_nodes\ComfyUI-SkinRe
 启动横幅会打印三样东西：本机控制台地址（带 `?token=`）、局域网地址、`/api/jobs` 的调用示例。打开带令牌的链接后令牌被写进 HttpOnly cookie，地址栏里的 `?token=` 立刻被抹掉，不会留在历史记录或截图里。
 
 端口撞车时换一个即可：`--port 8802`。Windows 上 `WinError 10013` 表示该端口被系统保留（Hyper-V / WSL / Docker 会静默占段），不是权限问题，启动器会直接说明。
+
+重绘引擎相关（见[局部重绘](#局部重绘可选默认关)）：`--repaint-url`（默认 `http://127.0.0.1:8188`）、`--repaint-autostart` / `--no-repaint-autostart`（默认开）、`--comfyui-dir`、`--comfyui-python`。启动横幅会打印引擎地址和它这一轮的状态（`standby` 表示已待命，`idle:` 后面跟原因）。
 
 ### 一键开关
 
@@ -260,11 +263,18 @@ python service.py toggle --lan   # 手机要连时用这个，自动生成令牌
 
 ### 局部重绘（可选，默认关）
 
-磨皮之后可以再跑一过扩散重绘，只重画检测到的痘印/红斑，用于清理纯滤波压不下去的定点瑕疵。**默认关闭**，因为代价和前提都很硬：
+磨皮之后可以再跑一过扩散重绘，只重画检测到的痘印/红斑，用于清理纯滤波压不下去的定点瑕疵。**单个任务默认不跑**，因为代价和前提都很硬：
 
-- 需要一个跑着的 ComfyUI 实例，`--repaint-url` 指定（默认 `$SKIN_REPAINT_URL` 或 `http://127.0.0.1:8189`）。拿不到就跳过，任务照常出图，界面与 meta 里写明跳过原因，不会失败。
+- 需要一个跑着的 ComfyUI 实例，`--repaint-url` 指定（默认 `$SKIN_REPAINT_URL` 或 `http://127.0.0.1:8188`，即 ComfyUI 的默认端口）。拿不到就跳过，任务照常出图，界面与 meta 里写明跳过原因，不会失败。
 - 本机唯一能离线跑的引擎是 SDXL 9 通道 inpaint（`utopianPony_v1Inpainting`）。LaMa / MI-GAN / SD1.5-inpaint 这些真正的小模型本机没有、也装不上，理由与实测见 `REPAINT_EXPLORE.md` 第 1 节。
-- 一过 896×896 的块约 10–12 秒。896×1152 的竖图通常命中 2 块，20 秒上下，是磨皮本身（0.8 秒）的 25 倍。
+- 一块 896×896 约 12–24 秒（首块含 6.9 GB checkpoint 加载约 33 秒）。896×1152 的竖图通常命中 2 块，是磨皮本身（0.8 秒）的数十倍。
+
+**引擎待命。** 服务启动时就把重绘引擎拉到可用的状态，不用你先去想 ComfyUI 开没开：
+
+- 8188 上已经有实例（无论你怎么起的）→ 直接复用，**绝不会接管或关闭它**；页面上该引擎的按钮显示「占用中」而不是「停止」。
+- 8188 上什么都没有 → 起一个私有实例，约 27 秒待命，日志写到 `<data-dir>/comfyui.log`，服务退出时一并关闭。
+- 想省那 2 GB 显存就加 `--no-repaint-autostart`（或 `--repaint-autostart` 显式开启，默认已开）。关闭自动待命后，页面「重绘」组标题旁的圆点仍是灰的，点旁边的「启动」按钮按需拉起；私有实例的日志与输出目录同样落在 data-dir 里。
+- 找不到 ComfyUI 安装目录时用 `--comfyui-dir` 指定（含 `main.py` 的那层），解释器用 `--comfyui-python`（默认找隔壁的 `python_embeded`）。找不到时按钮显示「不可用」，提示里写原因。
 
 实测（`tests/probe_web_repaint.py`，注入 26 个痘点 + 10 片红斑的基准图，掩膜命中 2 块）：
 
@@ -276,6 +286,8 @@ python service.py toggle --lan   # 手机要连时用这个，自动生成令牌
 掩膜外像素逐字节不变（`tests/repaint_test.py` 断言 `changed_outside == 0`），发丝与五官不受影响。**已知短板在自动检测不在引擎**：自动掩膜只覆盖注入痘点面积的 45%，剩余靠磨皮兜着；换成真值掩膜，同一个引擎能把瑕疵区残差从磨皮后的 6.20 压到 4.53、高频从 6.57 压到 4.44（`tests/probe_hit_check.py`）。
 
 三个参数：`repaint`（开关）、`repaint_denoise`（0.60，重绘幅度）、`repaint_steps`（8，采样步数——8 步与 20 步在本场景没有可测差异）。
+
+引擎的启停走 `GET /api/repaint/engine`（读状态）与 `POST /api/repaint/engine`（body `{"action": "start"|"stop"}`），状态字段为 `state`（`idle`/`starting`/`ready`/`failed`）、`available`、`managed`（是否由本服务拉起）、`spawnable`、`detail`。`start` 立即返回 `starting`，加载完成前请按 1–2 秒的间隔轮询。
 
 ### 界面能做什么
 

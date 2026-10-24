@@ -45,7 +45,10 @@ import uuid
 import cv2
 import numpy as np
 
-DEFAULT_URL = os.environ.get("SKIN_REPAINT_URL", "http://127.0.0.1:8189").rstrip("/")
+# 8188 is where ComfyUI listens by default, so an instance the user already runs
+# is picked up without any configuration. Override with SKIN_REPAINT_URL or
+# --repaint-url when theirs lives elsewhere.
+DEFAULT_URL = os.environ.get("SKIN_REPAINT_URL", "http://127.0.0.1:8188").rstrip("/")
 
 # Tile side in *source* pixels. 896 is what the benchmark measured; it is close
 # to SDXL's native resolution so the redrawn skin texture matches its surround.
