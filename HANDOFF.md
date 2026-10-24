@@ -45,6 +45,15 @@ t05 hf-energy clean=7.4 blur=2.0 ours=8.3 coverage=0.011
 & E:\comfyui\python_embeded\python.exe E:\SkinRetouch\tests\deliver_demo.py  # 写 deliver_pair / deliver_zoom
 ```
 
+图形界面 / 远程接口（两条自检，互相独立）：
+
+```powershell
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\tests\server_test.py    # 期望 SERVER OK 47 checks
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\tests\service_test.py   # 期望 SERVICE OK 37 checks
+```
+
+日常使用不必碰命令行：双击 `E:\SkinRetouch\服务开关.bat`，没跑就起（并打开浏览器），在跑就停。细节见下方「一键开关」。
+
 ### 关于输出目录
 
 测试脚本默认写 `tests/output/`。想换地方就设 `$env:SKIN_OUT`。
@@ -83,8 +92,15 @@ $env:SKIN_DEVICE="cuda"   # 或 cpu
 
 这几条是踩过坑、量过数据之后定下来的。想改之前先读理由。
 
-**1. 不用扩散模型重绘。**
-美肤是信号处理问题，不是重绘问题。任何扩散或 inpainting 模型都会重画皮肤，重画的代价是人脸身份漂移——眼神、牙形、痣的位置会变。生成模型出的图本来就干净，再拿它重绘一遍纯属毁图。用户明确只要美肤这一项。
+**1. 主路径不用扩散模型重绘；重绘只作为默认关闭的可选项，且只在小掩膜上。**
+美肤是信号处理问题，不是重绘问题，主路径必须保持 `skin_core` 的频域保边滤波。但"完全不能用重绘"这个判断已被实测修正（全文见 `REPAINT_EXPLORE.md`）：
+
+- **大掩膜确实会毁图**，原来的担忧在这个场景成立：把掩膜铺到整张皮肤（覆盖 39.5%）后，SSIM 从 0.954 掉到 0.899，瑕疵区残差反而从 7.95 恶化到 8.39，分块拼接还留下 4.66 的接缝梯度跳变（相邻行只有 2.2–3.0）。
+- **小掩膜不会**：稀疏痘点掩膜（覆盖 1.4%）分块重绘后，接缝梯度与坏图逐位相同（3.6150 vs 3.6172），掩膜外像素逐字节不变（`tests/repaint_test.py` 断言 `changed_outside == 0`），发丝一根没断。
+- **收益有据**：先用 `skin_retouch` 磨皮、再补一过重绘，瑕疵区残差 6.20 → 4.53、高频能量 6.57 → 4.44（真值掩膜，`tests/probe_hit_check.py`）。
+
+落地形态：网页服务的 `repaint` 开关，默认 `False`，只在 CPU 磨皮之后追加一过，掩膜由 `server/repaint.py` 自动检测（红通道窄带通 + 分位阈值）。**ComfyUI 不在线就跳过并写警告，绝不让任务失败。**
+**目前最大的空白：人脸身份漂移没有量化。** 本机 `~/.insightface/models` 为空（无 ArcFace 权重）、也没有 `lpips`/`pyiqa`，只有"掩膜外漂移 4.06 ≈ 纯 VAE 往返误差"这个代理证据，和 5 倍放大图的肉眼判断。要下"重绘不会改身份"的结论，得先补测量手段。
 
 **2. 不用 mediapipe / face mesh。**
 本机 `mediapipe 0.10.14` 配 `protobuf 5.29.5` 初始化即崩溃，`FaceDetection` 与 `FaceMesh` 都一样：
@@ -255,6 +271,93 @@ CPU，含检测的稳态耗时。耗时跟着**人脸像素尺寸**走，不跟�
 
 ---
 
+## 图形界面与远程接口
+
+`run_server.py` + `server/` 是一套零依赖的本地服务：同一个进程既提供网页界面，也提供 HTTP 接口。启动：
+
+```powershell
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\run_server.py           # 127.0.0.1:8791
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\run_server.py --lan --open
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\tests\server_test.py    # 期望 SERVER OK 47 checks
+```
+
+`server_test.py` 自己在随机端口起一个实例，跑完断言再关掉，不碰 `server/data/`。
+
+### 不要推翻的决定
+
+1. **不用 Flask / FastAPI**。项目硬约束是不新增依赖，checkout 现在只要 cv2 + torch 就能跑，这一点比路由写起来舒服重要。全部基于 `http.server.ThreadingHTTPServer`。
+2. **不做 Tkinter 桌面窗口**。Web 单页同时充当本机和远程界面，一套代码两用；Tk 出了这台机器就是废的。
+3. **前端用 350ms 轮询而不是 SSE**。任务只要 3–10 秒，轮询代码量是 SSE 的三分之一，且不受 `http.server` 在 keep-alive 下处理无 `Content-Length` 流的限制。SSE 端点仍然提供，给脚本用。
+4. **单 worker 串行队列**。6 GB 显存加上 ComfyUI 常驻，两张大图并跑必然 OOM。队列上限 8，满了返回 503。
+5. **不改 `skin_core.py`**。进度只能粗粒度（decode → pipeline → encode），细分耗时从返回的 `info` 里回填，而不是往算法里插回调。
+6. **参数走 query string，不走 JSON body**。这样浏览器可以直接用 `fetch` + 原始文件字节提交，和 `curl --data-binary` 是同一条路径。三种上传体（raw / multipart / base64 JSON）都在 `api.py:_extract_upload` 里。
+
+### 参数名映射集中在一处
+
+节点面向 `face_confidence` / `body_strength=0.0 表示跟随 strength`，而 `skin_core.skin_retouch()` 收 `conf` / `body_strength=None`。转换只在 `server/jobs.py:core_kwargs()` 里做一次，别在别处重复。
+
+`server/config.py:PARAM_SPECS` 是 13 个参数的单一事实源（label、范围、步长、中文说明、分组），`/api/schema` 直接把这张表给前端，前端按 `kind` 分派成滑杆 / 开关 / 分段控件。加参数就改这一处，前后端都会跟上。
+
+### 严格性：宁可报错也不静默
+
+- 未知参数名返回 `400 unknown_parameter`。原先拼错 `strengh=0.7` 会静默用默认值跑出一张"看起来对"的图，这种错误最难查。
+- 越界值返回 400，不做 clamp。
+- 客户端文件名只用于展示和 `Content-Disposition`，落盘一律 `source<按 magic bytes 嗅探的扩展名>`，路由侧还有 `JOB_ID_RE` + `commonpath` 双重校验，防路径穿越。
+
+### 三个真实踩到的坑
+
+- **7861 不能用**：它落在 `netsh int ipv4 show excludedportrange protocol=tcp` 里 7779–7878 这一段（Hyper-V / WSL 的保留段），绑定直接 `WinError 10013`。默认端口因此是 8791，启动器对 10013 有专门文案。
+- **拒绝请求前必须把 body 读掉**：未授权就直接回 401 并关连接，客户端还在写请求体，系统会把它变成一个 RST，客户端看到的是 `ConnectionAbortedError` 而不是 401。浏览器同样表现为网络错误，而不是触发令牌弹窗。`server/api.py:_drain_body()` 在 `_json_error()` 里先把未读的 body 吃掉再回错，`Handler.timeout = 60` 兜住慢客户端。这条在空闲机器上偶发、在负载高时必现，属于典型的「测试跑一次过、跑三次挂一次」。
+- **CSS `line-height: 0` 会切碎文字**：`.compare` 用 `line-height: 0` 消掉 inline 图片的基线间隙，结果里面的「原图/修后」标签行盒塌陷成 0 高，字形被切掉一半，放大看是一排彩色碎片。给标签单独设 `line-height: 1.5` 并 `transform: translateZ(0)`（避免继承 `.clipped` 层 `will-change: clip-path` 造成的分数像素挤压）才干净。
+
+### 界面结构
+
+`server/webui/` 是纯静态三件套，没有构建步骤。`index.html` 只有骨架和 id，参数行、诊断表、预设按钮全部由 `app.js` 按 `/api/schema` 生成。
+
+- `app.css` 的暗房配色用 CSS 变量集中在 `:root`，滑杆填充靠 `--fill`、对比滑块靠 `--split`，都不改 DOM 结构。
+- 预览图长边 2400px（`--preview` 可调），20 MP 原图直接给浏览器解码要 80 MB，滑块会卡；全分辨率 PNG 走下载按钮。
+- 刷新不丢结果是 `localStorage.skin.lastJob` + `?job=<id>`，恢复时会重新拉 `kind=source` 的原始字节，所以恢复后还能直接改参数重跑。
+- **任务 id 的服务端契约**：`meta.json` 存的就是完整 snapshot，所以 `server/api.py` 的 `_job_snapshot` / `_meta` / `_result` 都会在内存队列查不到时回落读盘（`_ARTIFACT_FILES` 把 metadata 里的 artifact key 映射回文件名）。重启服务后旧 id 依然 200，这个行为由 `tests/server_test.py` 的「survives a restart」三条断言守着，别为了省事把回落删掉。
+- `[hidden] { display: none !important; }` 必须留着：`.busy` / `.gate` / `.dropzone` 都是 `display: grid`，会压过 `hidden` 属性，导致首屏被遮罩糊住。
+
+### 安全边界
+
+回环绑定不需要令牌；非回环必须令牌（不给就随机生成并打印）；`--no-auth` + 非回环直接拒绝启动、退出码 2。令牌接受 `Authorization: Bearer` / `X-Auth-Token` / `?token=` / cookie `skin_token`，用 `hmac.compare_digest` 比对，连续 5 次失败锁 60 秒。`?token=` 登录成功后前端立刻 `history.replaceState` 抹掉地址栏。
+
+### 一键开关
+
+**做了什么**：`服务开关.bat` 双击即切换（没跑就起并开浏览器，在跑就停），背后是 `service.py`——`start / stop / restart / status / open / logs / toggle` 七个动词，只用标准库。PID、端口、令牌、局域网地址记在 `server/data/service.json`，服务端横幅落在 `server/data/service.log`（超过 2 MB 轮转成 `.log.1`）。`tests/service_test.py` 37 项断言全绿，`SERVICE OK 37 checks`。
+
+**为什么这么定**：
+
+- **用 `DETACHED_PROCESS` 起子进程，而不是前台跑**。双击的窗口只是为了报告结果，用户关掉它不该把服务带走；detach 之后同一个 bat 再双击一次就是「停止」，这就是"一键"的全部实现。
+- **不 import `server` 包**。`service.py` 只依赖标准库：`import server.api` 会连带加载 cv2 和 torch，那要 2–4 秒，比开关本身该花的时间多两个数量级。token 生成用 `secrets.token_urlsafe(18)`，与 `server/config.py:new_token()` 同一个算法但各自实现，不值得为一行函数付加载代价。
+- **自己生成并持久化令牌**。`run_server.py --lan` 会在子进程里生成令牌只打印到横幅，父进程拿不到，`status` 就没法给出可直接点开的地址。所以 `service.py` 在非回环时自己 mint 一个、`--token` 传给子进程、同时写进 state。别人的令牌在 `service.json` 里是明文——这个文件在 `.gitignore` 覆盖的 `server/data/` 下，和上传的图同一级别。
+- **`stop` 用 `taskkill /PID /T /F`，不做优雅关闭**。detached 进程没有控制台，收不到 `CTRL_BREAK`；给它开一个 `POST /api/shutdown` 端口等于多一个攻击面。强杀的代价可控：`store.write()` 是 `.part` + `os.replace` 原子写，残留的 `.part` 文件不影响正确性，孤儿目录由 TTL 扫描清掉。
+- **只停自己启动的进程**。state 里有 PID 且存活才动手；手动 `run_server.py` 起的实例会被明确告知"找不到它的 PID"，而不是去 `netstat` 猜端口属主然后误杀。pid 会被回收，所以 `pid_alive` 之外还要用 `/api/health` 的 `Server: SkinRetouch/` 头确认对端确实是这个服务。
+
+**没做什么**：
+
+- 没有系统托盘图标。那需要 `pystray` 或 PowerShell 的 WinForms，两者都比"一个 bat"重得多，而零依赖是硬约束。
+- 没有开机自启。要的话是往 `shell:startup` 里放一个快捷方式，不需要代码。
+- 没有服务化（`sc create`）。Windows 服务要求实现 SCM 协议，和"一个能双击的脚本"是两种东西。
+- 没做多实例管理：一个 data 目录只认一个 PID 文件，两个端口要两个 `--data-dir`（`service_test.py` 里的 "a second data dir refuses the busy port" 守着这条）。
+
+**怎么验证**：
+
+```powershell
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\tests\service_test.py   # 期望 SERVICE OK 37 checks
+& E:\comfyui\python_embeded\python.exe E:\SkinRetouch\service.py status       # 期望 status running / stopped
+```
+
+测试在临时数据目录里真起真杀，覆盖：起停闭环、重复 `start` 是空操作且 PID 不变、端口真的释放、进程真的消失、`toggle` 的两个方向、`logs` 能读到横幅、第二个 data 目录拒绝占用中的端口、过期 PID 文件不阻塞启动、`restart` 后磁盘上的任务仍可读。
+
+启动函数的日志编码有个坑值得记：detached 子进程没有控制台，Python 的 stdout 回落到 locale 代码页（这机器上是 cp936），横幅会以 GBK 写进日志，`service.py logs` 用 UTF-8 读就得到一串替换字符。`spawn_server()` 通过 `PYTHONIOENCODING=utf-8` 把子进程的编码钉死，`main()` 再给 stdout 加 `errors="replace"` 兜底——状态查询不该因为一行历史日志就崩。
+
+另一条：客户端中途断开（探活超时、关掉标签页、被 kill 的 curl）在 Windows 上抛的是 `ConnectionAbortedError`（10053），**不是** `ConnectionResetError`。`api.py:_dispatch` 原先只列了后者，于是每次断连都被当成 500 记录一条 traceback，日志里全是噪声。现在两个都列出，`Handler.handle_one_request` 再兜一层。验证方式：连上就关的 socket 打三个请求，日志应当零增长。
+
+---
+
 ## 可以继续的方向
 
 1. 暴露色距阈值 `lo/hi` 作为节点参数，救极端光照。
@@ -284,6 +387,9 @@ E:\SkinRetouch\
     blemish_test.py      注入瑕疵再还原，CPU 脸路径回归基线（带断言）
     node_test.py         节点输入输出契约
     compare_paths.py     CPU / GPU 两条路径的一致性预算
+    server_test.py       本地服务 HTTP 端到端自检（54 项断言，随机端口自起自停）
+    repaint_test.py      局部重绘自检（15 项断言，引擎不在线时跳过在线部分）
+    service_test.py      一键开关起停自检（37 项断言，临时数据目录里真起真杀）
     deliver_demo.py      成品对比图
     probe_body_final.py  20 MP 端到端，出 final_out_/final_mask_/final_side_
     dump_compare.py      1:1 前后对比裁剪
@@ -293,6 +399,18 @@ E:\SkinRetouch\
                          留着是为了不重复踩坑，不参与验收
     assets/              测试原图（3 张 896×1152 + 2 张 20.7 MP）
     output/              对照图产物
+  run_server.py          图形界面 / 远程接口启动器（argparse + 令牌策略 + 启动横幅）
+  服务开关.bat           双击开关（纯 ASCII，避免 cmd 代码页问题）
+  service.py             开关本体：start/stop/restart/status/open/logs/toggle，只用标准库
+  server/
+    __init__.py          把项目根挂进 sys.path，导出 serve()
+    config.py            PARAM_SPECS 参数表、PRESETS、Config、令牌与参数校验
+    store.py             任务落盘、magic bytes 嗅探扩展名、TTL 清理
+    jobs.py              单 worker 串行队列、core_kwargs 参数映射、PNG/JPEG 编码、meta.json
+    repaint.py           SDXL 9 通道 inpaint 客户端：掩膜检测、分块规划、alpha 融合、降级
+    api.py               http.server 路由、鉴权、CORS、三种上传体、SSE
+    webui/               index.html / app.css / app.js / favicon.svg（无构建步骤）
+  server/data/           运行时任务目录（.gitignore，可随时删）
 ```
 
 **自动化验收**：`blemish_test.py` 与 `compare_paths.py` 现在会在数值越界时 `SystemExit(1)` 并打印 `FAIL`，可以直接挂 CI。前者锁 CPU 脸路径（t01/t07/t05 三组 hf-energy 与覆盖率），后者锁两条路径的差距（覆盖率相对差 <3%、成图 p99 <15、均值差 <2）。

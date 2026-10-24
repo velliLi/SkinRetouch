@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex, nofollow">
+<title>Skin Retouch · 保边美肤控制台</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none"><path d="M6 24c6-2 8-6 10-12s6-8 10-6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="25" r="1.6" fill="currentColor"/><circle cx="23" cy="5" r="1.6" fill="currentColor"/></svg>
+    </span>
+    <div class="brand-text">
+      <h1>Skin&nbsp;Retouch</h1>
+      <p>保边美肤 · 只动皮肤，不动五官</p>
+    </div>
+  </div>
+
+  <div class="statusline">
+    <span class="status" id="status" data-state="connecting">
+      <i class="dot"></i><span id="status-text">连接中</span>
+    </span>
+    <span class="status-sep"></span>
+    <span class="chip" id="chip-device" title="计算设备">—</span>
+    <span class="chip" id="chip-version" title="服务版本">v—</span>
+    <button class="ghost tiny" id="btn-login" hidden>输入令牌</button>
+  </div>
+</header>
+
+<main class="workspace">
+
+  <aside class="panel" id="panel" aria-label="参数面板">
+    <div class="panel-head">
+      <span class="label">参数</span>
+      <button class="ghost tiny" id="btn-reset" title="恢复默认">重置</button>
+    </div>
+
+    <section class="presets" id="presets" aria-label="预设"></section>
+
+    <div class="params" id="params"></div>
+
+    <div class="panel-foot">
+      <button class="primary" id="btn-run" disabled>
+        <span class="primary-label">开始处理</span>
+        <kbd>⌘↵</kbd>
+      </button>
+      <p class="hint" id="run-hint">拖一张照片进来</p>
+    </div>
+  </aside>
+
+  <section class="stage" id="stage" data-zoom="fit" data-mode="compare">
+
+    <div class="stage-bar">
+      <div class="tabs" role="tablist" aria-label="视图">
+        <button role="tab" class="tab" data-tab="compare" aria-selected="true">对比</button>
+        <button role="tab" class="tab" data-tab="result" aria-selected="false">成图</button>
+        <button role="tab" class="tab" data-tab="mask" aria-selected="false">掩膜</button>
+        <button role="tab" class="tab" data-tab="diag" aria-selected="false">诊断</button>
+      </div>
+      <div class="stage-tools">
+        <button class="ghost tiny" id="btn-zoom" title="适应 / 1:1">适应</button>
+        <button class="ghost tiny" id="btn-swap" title="交换左右" hidden>交换</button>
+        <a class="ghost tiny" id="btn-download" hidden download>下载 PNG</a>
+      </div>
+    </div>
+
+    <div class="canvas" id="canvas">
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp,image/tiff,image/bmp" hidden>
+        <span class="dz-ring" aria-hidden="true"></span>
+        <strong>放一张照片进来</strong>
+        <span class="dz-sub">PNG / JPEG / TIFF / WebP · 单张最大 <em id="dz-limit">128 MB</em></span>
+        <span class="dz-sub muted">或点击选择文件</span>
+      </label>
+
+      <div class="compare" id="compare" hidden>
+        <img class="layer base" id="img-out" alt="处理结果" draggable="false">
+        <div class="layer clipped" id="clip-top">
+          <img id="img-src" alt="原图" draggable="false">
+        </div>
+        <div class="divider" id="divider"><span class="knob" aria-hidden="true"></span></div>
+        <span class="tag tag-left">原图</span>
+        <span class="tag tag-right">修后</span>
+      </div>
+
+      <div class="single" id="single" hidden>
+        <img id="img-single" alt="预览" draggable="false">
+      </div>
+
+      <div class="diag" id="diag" hidden></div>
+
+      <div class="busy" id="busy" hidden>
+        <div class="busy-inner">
+          <div class="phases" id="phases">
+            <span data-phase="decode">解码</span>
+            <span data-phase="pipeline">美肤计算</span>
+            <span data-phase="repaint" hidden>局部重绘</span>
+            <span data-phase="encode">编码</span>
+          </div>
+          <div class="busy-meta">
+            <span class="mono" id="busy-timer">0.0 s</span>
+            <span class="muted" id="busy-note"></span>
+            <span class="grow"></span>
+            <button class="link-btn" id="btn-cancel" hidden>取消排队</button>
+          </div>
+          <div class="bar"><i id="busy-bar"></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage-foot">
+      <span class="mono" id="meta-size"></span>
+      <span class="sep"></span>
+      <span class="mono" id="meta-time"></span>
+      <span class="sep"></span>
+      <span class="mono" id="meta-cover"></span>
+      <span class="grow"></span>
+      <span class="muted" id="meta-note">首次运行需加载检测器，约 20 秒</span>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <span id="foot-api" class="mono">API · /api/jobs</span>
+  <span class="grow"></span>
+  <span class="muted" id="foot-env">—</span>
+</footer>
+
+<div class="toast-wrap" id="toasts" aria-live="polite"></div>
+
+<div class="gate" id="gate" hidden>
+  <form class="gate-card" id="gate-form">
+    <span class="label">远程访问需要令牌</span>
+    <p class="muted">令牌打印在服务启动时的终端里，也可用 <code>--token</code> 指定。</p>
+    <input type="password" id="gate-input" placeholder="粘贴令牌" autocomplete="current-password" spellcheck="false">
+    <button class="primary" type="submit">进入</button>
+    <p class="gate-error" id="gate-error"></p>
+  </form>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

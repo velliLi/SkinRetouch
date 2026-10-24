@@ -17,6 +17,10 @@ models/*.pth
 tests/output/
 tests/assets/
 
+# 本地服务运行时（上传的原图、成图、掩膜、meta.json 一律不入库）
+server/data/
+.shot/
+
 # 编辑器 / 系统
 .vscode/
 .idea/
