@@ -175,7 +175,7 @@ E:\SkinRetouch\
     node_test.py         节点输入输出契约
     compare_paths.py     CPU / GPU 两条路径的一致性预算
     server_test.py       本地服务的 HTTP 端到端自检（58 项断言）
-    repaint_test.py      局部重绘的自检（15 项断言，引擎不在线时自动跳过在线部分）
+    repaint_test.py      局部重绘的自检（30 项断言，三个引擎各跑一遍，权重不在时跳过对应引擎）
     service_test.py      一键开关的起停端到端自检（37 项断言）
     deliver_demo.py      成品对比图
     probe_body_final.py  20 MP 端到端与计时
@@ -188,8 +188,8 @@ E:\SkinRetouch\
   service.py             开关本体：start / stop / status / logs / toggle
   server/
     __init__.py          把项目根挂进 sys.path，导出 serve()
-    config.py            参数表、预设、Config（13 个参数的单一事实源）
-    repaint.py           SDXL 9 通道 inpaint 的客户端：掩膜检测、分块、融合
+    config.py            参数表、预设、Config（15 个参数的单一事实源）
+    repaint.py           重绘层：掩膜检测、三个引擎（migan/lama 本地 TorchScript、sdxl 走 ComfyUI）、高频回贴、融合
     engine.py            重绘引擎的生死：探测、复用、按需拉起私有 ComfyUI
     store.py             任务落盘、magic bytes 嗅探、TTL 清理
     jobs.py              单 worker 串行队列、结果编码、meta.json
@@ -225,7 +225,7 @@ New-Item -ItemType Junction -Path E:\comfyui\ComfyUI\custom_nodes\ComfyUI-SkinRe
 
 端口撞车时换一个即可：`--port 8802`。Windows 上 `WinError 10013` 表示该端口被系统保留（Hyper-V / WSL / Docker 会静默占段），不是权限问题，启动器会直接说明。
 
-重绘引擎相关（见[局部重绘](#局部重绘可选默认关)）：`--repaint-url`（默认 `http://127.0.0.1:8188`）、`--repaint-autostart` / `--no-repaint-autostart`（默认开）、`--comfyui-dir`、`--comfyui-python`。启动横幅会打印引擎地址和它这一轮的状态（`standby` 表示已待命，`idle:` 后面跟原因）。
+重绘引擎相关（见[局部重绘](#局部重绘可选默认关)）：`--repaint-models`（权重目录，默认 `models/repaint`）。只有选 `sdxl` 引擎才用得到这些：`--repaint-url`（默认 `http://127.0.0.1:8188`）、`--repaint-autostart` / `--no-repaint-autostart`（默认开）、`--comfyui-dir`、`--comfyui-python`。启动横幅会打印本地引擎就绪情况与权重目录，以及 ComfyUI 地址和它这一轮的状态（`standby` 表示已待命，`idle:` 后面跟原因）。
 
 ### 一键开关
 
@@ -263,35 +263,68 @@ python service.py toggle --lan   # 手机要连时用这个，自动生成令牌
 
 ### 局部重绘（可选，默认关）
 
-磨皮之后可以再跑一过扩散重绘，只重画检测到的痘印/红斑，用于清理纯滤波压不下去的定点瑕疵。**单个任务默认不跑**，因为代价和前提都很硬：
+磨皮之后可以再跑一过 inpaint，只重画检测到的痘印/红斑，用于清理纯滤波压不下去的定点瑕疵。**单个任务默认不跑**。三个引擎在页面「重绘引擎」里选：
 
-- 需要一个跑着的 ComfyUI 实例，`--repaint-url` 指定（默认 `$SKIN_REPAINT_URL` 或 `http://127.0.0.1:8188`，即 ComfyUI 的默认端口）。拿不到就跳过，任务照常出图，界面与 meta 里写明跳过原因，不会失败。
-- 本机唯一能离线跑的引擎是 SDXL 9 通道 inpaint（`utopianPony_v1Inpainting`）。LaMa / MI-GAN / SD1.5-inpaint 这些真正的小模型本机没有、也装不上，理由与实测见 `REPAINT_EXPLORE.md` 第 1 节。
-- 一块 896×896 约 12–24 秒（首块含 6.9 GB checkpoint 加载约 33 秒）。896×1152 的竖图通常命中 2 块，是磨皮本身（0.8 秒）的数十倍。
+| 引擎 | 体积 | 一张 896×1152 | 依赖 | 掩膜内高频保留 |
+|---|---|---|---|---|
+| `migan`（默认） | 25.8 MB | 3 秒 | 只要 torch | 0.88 |
+| `lama` | 196 MB | 6.5 秒 | 只要 torch | 0.89 |
+| `sdxl` | 6.9 GB | 171 秒 | 一个跑着的 ComfyUI | 0.71 |
 
-**引擎待命。** 服务启动时就把重绘引擎拉到可用的状态，不用你先去想 ComfyUI 开没开：
+「掩膜内高频保留」是掩膜内的 Laplacian 能量除以掩膜外环带的同量（`tests/probe_small_inpaint.py` 的 `tex_ratio`），1.0 表示重画过的皮肤和周围同质感，低于 0.8 就开始发糊；干净原图本身是 0.90。表中 `migan` 取 `repaint_hf=1.1`、`lama` 取 `1.15`、`sdxl` 无回贴。
 
-- 8188 上已经有实例（无论你怎么起的）→ 直接复用，**绝不会接管或关闭它**；页面上该引擎的按钮显示「占用中」而不是「停止」。
-- 8188 上什么都没有 → 起一个私有实例，约 27 秒待命，日志写到 `<data-dir>/comfyui.log`，服务退出时一并关闭。
-- 想省那 2 GB 显存就加 `--no-repaint-autostart`（或 `--repaint-autostart` 显式开启，默认已开）。关闭自动待命后，页面「重绘」组标题旁的圆点仍是灰的，点旁边的「启动」按钮按需拉起；私有实例的日志与输出目录同样落在 data-dir 里。
-- 找不到 ComfyUI 安装目录时用 `--comfyui-dir` 指定（含 `main.py` 的那层），解释器用 `--comfyui-python`（默认找隔壁的 `python_embeded`）。找不到时按钮显示「不可用」，提示里写原因。
+**为什么默认不是 SDXL。** 采样式 inpaint 会把整片掩膜重新生成，掩膜里原有的毛孔、细纹一并消失，只剩下模型自己编的低频起伏；和旁边真皮肤放在一起，就是"起了一层斑"。这不是感觉，同一张测试图同一个掩膜（`tests/repaint_test.py`）：
 
-实测（`tests/probe_web_repaint.py`，注入 26 个痘点 + 10 片红斑的基准图，掩膜命中 2 块）：
-
-| | 瑕疵区残差 | 瑕疵区高频能量 |
+| 引擎 | 掩膜内平均改动 | 掩膜内高频能量 |
 |---|---|---|
-| 磨皮后 | 4.80 | 6.46 |
-| 再加一过重绘 | **4.10** | **5.46** |
+| 磨皮后（输入） | — | 4.15 |
+| `migan` | 7.27 | **4.28** |
+| `lama` | 5.19 | **4.30** |
+| `sdxl` | 6.99 | **3.00**（掉了 28%） |
+
+擦除式模型（MI-GAN / LaMa）只输出被擦掉那块的低频填补，本身也没有毛孔。所以两者都要补一道「高频回贴」：把原图的高频带（`src − GaussianBlur(src, 2.5)`）按掩膜 alpha 叠回去。瑕疵只污染低频，高频是好的，回贴比让模型凭空合成可控得多——`migan` 不回贴时 `tex` 只有 0.45，1.1 倍回到 0.88、1.3 倍过冲到 0.99（高于干净原图的 0.90），所以默认 1.15、上限 1.2。`spk_rat`（掩膜内 vs 环带的斑点比值，>1 表示造了新斑）从 0.33 升到 0.83，没有超过 1。
+
+**拿权重。** 两个本地引擎的权重不进仓库，首次使用跑一次：
+
+```
+python tests/fetch_repaint_weights.py --model migan     # 25.8 MB，约 30 秒
+python tests/fetch_repaint_weights.py --model lama      # 196 MB，断点续传
+```
+
+默认落在 `models/repaint/`，MD5 校验不过就重下。换目录用 `--repaint-models` 或 `SKIN_REPAINT_MODELS`。权重缺失时页面「重绘」组标题的圆点灰着，勾上也会被跳过并在 meta 里写明原因，任务照常出图，不会失败。
+
+**三个参数。** `repaint`（开关）、`repaint_engine`（`migan`/`lama`/`sdxl`）、`repaint_hf`（0–2，高频回贴强度，0 关闭，默认 1.15）。`repaint_denoise`（0.60）与 `repaint_steps`（8）只对 `sdxl` 有意义，选另两个引擎时在页面上是灰的。
 
 掩膜外像素逐字节不变（`tests/repaint_test.py` 断言 `changed_outside == 0`），发丝与五官不受影响。**已知短板在自动检测不在引擎**：自动掩膜只覆盖注入痘点面积的 45%，剩余靠磨皮兜着；换成真值掩膜，同一个引擎能把瑕疵区残差从磨皮后的 6.20 压到 4.53、高频从 6.57 压到 4.44（`tests/probe_hit_check.py`）。
 
-三个参数：`repaint`（开关）、`repaint_denoise`（0.60，重绘幅度）、`repaint_steps`（8，采样步数——8 步与 20 步在本场景没有可测差异）。
+**网页端全链路实测**（`tests/probe_web_repaint.py`，注入 26 个痘点 + 10 片红斑，自动掩膜只覆盖注入面积的 45%）：
 
-引擎的启停走 `GET /api/repaint/engine`（读状态）与 `POST /api/repaint/engine`（body `{"action": "start"|"stop"}`），状态字段为 `state`（`idle`/`starting`/`ready`/`failed`）、`available`、`managed`（是否由本服务拉起）、`spawnable`、`detail`。`start` 立即返回 `starting`，加载完成前请按 1–2 秒的间隔轮询。
+| | 瑕疵区残差 | 掩膜覆盖区内残差 | 瑕疵区高频能量 | 重绘耗时 |
+|---|---|---|---|---|
+| 磨皮后 | 6.14 | 4.80 | 6.46 | — |
+| + `migan` | **5.79** | **4.02** | 6.55 | 4.1 秒 |
+| + `lama` | 5.83 | 4.12 | 6.52 | 8.8 秒 |
+| + `sdxl` | 5.83 | 4.10 | **5.46** | 22.6 秒 |
+
+看最后一列：`migan`/`lama` 把瑕疵区高频维持在 6.5（磨皮后 6.46，干净原图 5.03，多出来的是注入的颗粒），`sdxl` 掉到 5.46——掉的就是它自己重画掉的真纹理。这一列比残差更能说明"重绘之后皮肤像糊了一层"是怎么来的。
+
+**别把掩膜开大。** 三个引擎在 33% 皮肤的大掩膜上都会坏，只是坏法不同：`migan`/`lama` 压平光照梯度（同一张脸上两块区域的均值差 33/26 灰阶），`sdxl` 保色调但把纹理压到 0.845 并耗时 363 秒。生产路径的 `blemish_mask` 只产 1.6–2.2% 的稀疏掩膜，这才是它们该被用的尺度。
+
+### SDXL 引擎与 ComfyUI（仅 `repaint_engine=sdxl` 时需要）
+
+选 `migan` 或 `lama` 时整节可以跳过：不需要 ComfyUI、不占显存、没有启动等待。选 `sdxl` 才需要一个活着的 ComfyUI，服务会替你管：
+
+- `--repaint-url` 指定地址（默认 `$SKIN_REPAINT_URL` 或 `http://127.0.0.1:8188`，即 ComfyUI 的默认端口）。拿不到就跳过这次重绘，任务照常出图，界面与 meta 里写明跳过原因。
+- 8188 上已经有实例（无论你怎么起的）→ 直接复用，**绝不会接管或关闭它**；页面上该引擎的按钮显示「占用中」而不是「停止」。
+- 8188 上什么都没有 → 起一个私有实例，约 27 秒待命，日志写到 `<data-dir>/comfyui.log`，服务退出时一并关闭。
+- 想省那 2 GB 显存就加 `--no-repaint-autostart`。关闭后页面圆点是灰的，点旁边的「启动」按钮按需拉起。
+- 找不到 ComfyUI 安装目录时用 `--comfyui-dir` 指定（含 `main.py` 的那层），解释器用 `--comfyui-python`（默认找隔壁的 `python_embeded`）。
+
+启停走 `GET /api/repaint/engine`（读状态）与 `POST /api/repaint/engine`（body `{"action": "start"|"stop"}`），状态字段为 `state`（`idle`/`starting`/`ready`/`failed`）、`available`、`managed`（是否由本服务拉起）、`spawnable`、`detail`。`start` 立即返回 `starting`，加载完成前请按 1–2 秒的间隔轮询。
 
 ### 界面能做什么
 
-- **三档预设 + 13 个参数**，滑杆实时显示数值，参数说明直接写在下面，不用回 README 找含义。
+- **三档预设 + 15 个参数**，滑杆实时显示数值，参数说明直接写在下面，不用回 README 找含义。
 - **对比滑块**：原图与修后叠在一起，拖动分割线看差异，键盘方向键可微调；另有单图视图、掩膜视图、诊断视图。
 - **掩膜视图**回答"它到底动了哪里"：白色是会被美肤的像素，五官保留为黑。
 - **诊断视图**给出分辨率、三段耗时条形图，以及每张脸/身体的位置、覆盖比例、羽化半径、分割条带数。

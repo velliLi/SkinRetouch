@@ -24,6 +24,7 @@ import webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from server import VERSION  # noqa: E402
+from server import repaint  # noqa: E402
 from server.api import create_server  # noqa: E402
 from server.config import DEFAULT_PREVIEW_MAX_PX, Config, new_token  # noqa: E402
 
@@ -62,6 +63,9 @@ def parse_args(argv=None):
     parser.add_argument("--ttl", type=int, default=3600, help="seconds a job survives on disk")
     parser.add_argument("--queue", type=int, default=8, help="max jobs waiting behind the worker")
     parser.add_argument("--max-upload-mb", type=int, default=128, help="upload size ceiling")
+    parser.add_argument("--repaint-models", default="",
+                        help="directory holding migan_traced.pt / big-lama.pt "
+                             "(default: $SKIN_REPAINT_MODELS or models/repaint)")
     parser.add_argument("--repaint-url", default="",
                         help="ComfyUI base URL for the optional repaint pass "
                              "(default: $SKIN_REPAINT_URL or http://127.0.0.1:8188)")
@@ -146,6 +150,7 @@ def main(argv=None) -> int:
         queue_limit=max(1, args.queue),
         data_dir=args.data_dir,
         repaint_url=args.repaint_url.rstrip("/"),
+        repaint_models=args.repaint_models.strip(),
         repaint_autostart=bool(args.repaint_autostart),
         comfyui_dir=args.comfyui_dir,
         comfyui_python=args.comfyui_python,
@@ -188,7 +193,16 @@ def main(argv=None) -> int:
     else:
         say("  auth      %s" % note)
     say("  data      %s" % cfg.resolved_data_dir())
-    say("  repaint   %s" % server.engine.url)
+    nets = repaint.engines_status(timeout=0.4)
+    local = [name for name in ("migan", "lama") if nets[name]["ready"]]
+    say("  repaint   %s  (%s)" % (
+        ", ".join(local) if local else "no local weights",
+        repaint.MODEL_DIR))
+    for name in ("migan", "lama"):
+        if not nets[name]["ready"]:
+            say("            %s idle: weights missing, run "
+                "tests/fetch_repaint_weights.py --model %s" % (name, name))
+    say("  sdxl      %s" % server.engine.url)
     status = server.engine.status()
     if cfg.repaint_autostart and not status["available"] and status["spawnable"]:
         say("            warming up: starting a private ComfyUI "

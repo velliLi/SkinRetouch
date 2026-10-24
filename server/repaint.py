@@ -66,9 +66,181 @@ NEG = ("blemish, pimple, acne, red spots, blotchy, plastic, waxy, blurry, "
 
 RED = 2  # BGR
 
+# ---------------------------------------------------------------- local nets
+#
+# MI-GAN and LaMa are TorchScript graphs: a single torch.jit.load, no ComfyUI, no
+# sampler. They matter because both are erase-style - the pixels outside the mask
+# come back bit-identical - while a sampling engine round-trips the whole tile
+# through its VAE. Measured on two real portraits, SDXL moved the skin outside
+# the mask by 3.91 and 4.44 grey levels on average (p99 30 and 39) and flattened
+# the texture inside it to tex 0.94; these two move it by exactly 0 and keep
+# tex at 0.99-1.01. That untouched-surround difference is what reads as
+# "spotting the surface of the skin".
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_DIR = os.environ.get("SKIN_REPAINT_MODELS") or os.path.join(ROOT, "models", "repaint")
+NET_FILES = {"migan": "migan_traced.pt", "lama": "big-lama.pt"}
+ENGINES = ("migan", "lama", "sdxl")
+DEFAULT_ENGINE = "migan"
+NET_TILE = 512          # MI-GAN's traced graph is fixed at 512; feed it 1:1
+HF_SIGMA = 2.5          # split between "texture" and "shading"
+HF_STRENGTH = 1.15      # how much of the source high band to graft back
+_NETS = {}
+
 
 class RepaintError(RuntimeError):
     """The repaint engine could not be reached or refused the request."""
+
+
+# ------------------------------------------------------------------ local nets
+
+
+def net_path(engine: str) -> str:
+    """Where the TorchScript graph for `engine` is expected to live."""
+    name = NET_FILES.get(engine)
+    return os.path.join(MODEL_DIR, name) if name else ""
+
+
+def net_ready(engine: str) -> bool:
+    path = net_path(engine)
+    return bool(path) and os.path.exists(path)
+
+
+def load_net(engine: str, device: str = "cpu"):
+    """Load and cache one TorchScript repair net. torch is imported lazily."""
+    key = (engine, device)
+    if key in _NETS:
+        return _NETS[key]
+    path = net_path(engine)
+    if not path or not os.path.exists(path):
+        raise RepaintError(
+            "%s weights missing at %s - run tests/fetch_repaint_weights.py --model %s"
+            % (engine, path or MODEL_DIR, engine))
+    import torch
+    net = torch.jit.load(path, map_location=device).eval()
+    _NETS[key] = net
+    return net
+
+
+def _net_tiles(shape, core, side, min_px=32):
+    """Whole `side` windows that contain enough mask pixels to be worth a pass."""
+    h, w = shape[:2]
+    out = []
+    for y0 in range(0, h, side):
+        for x0 in range(0, w, side):
+            if core[y0:y0 + side, x0:x0 + side].sum() >= min_px:
+                out.append((y0, x0))
+    return out
+
+
+def _inpaint_migan(bgr, mask, net, side=NET_TILE, device="cpu", min_px=32):
+    """Feed MI-GAN native 512 windows.
+
+    Squeezing a whole face crop into one 512 window was the first attempt and it
+    threw away the pores the patch is supposed to keep (tex 0.29 against real
+    skin at 0.90). The traced graph is fixed at 512, so 1:1 windows are the only
+    way to keep the detail. Pre/post-processing follows iopaint: RGB scaled to
+    -1..1, the erased image and (0.5 - mask) stacked as four channels.
+    """
+    import torch
+
+    core = mask > 127
+    if not core.any():
+        return bgr.copy(), 0.0
+    h, w = bgr.shape[:2]
+    res = bgr.copy()
+    total = 0.0
+    for y0, x0 in _net_tiles(bgr.shape, core, side, min_px):
+        y1, x1 = min(y0 + side, h), min(x0 + side, w)
+        ph, pw = y1 - y0, x1 - x0
+        crop = bgr[y0:y1, x0:x1]
+        cmask = mask[y0:y1, x0:x1]
+        if ph < side or pw < side:
+            crop = cv2.copyMakeBorder(crop, 0, side - ph, 0, side - pw,
+                                      cv2.BORDER_REFLECT_101)
+            cmask = cv2.copyMakeBorder(cmask, 0, side - ph, 0, side - pw,
+                                       cv2.BORDER_REFLECT_101)
+
+        rgb = crop[:, :, ::-1].astype(np.float32) / 255.0 * 2.0 - 1.0
+        m = (cmask > 120).astype(np.float32)
+        inp = np.concatenate([(0.5 - m)[..., None], rgb * (1.0 - m[..., None])], axis=2)
+        t = torch.from_numpy(np.ascontiguousarray(inp.transpose(2, 0, 1)[None]))
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            out = net(t.to(device))
+        total += (time.perf_counter() - t0) * 1000.0
+        arr = ((out[0].permute(1, 2, 0).cpu().numpy() * 127.5 + 127.5)
+               .round().clip(0, 255).astype(np.uint8))
+        got = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)[:ph, :pw]
+
+        sel = cmask[:ph, :pw] > 127
+        region = res[y0:y1, x0:x1]
+        region[sel] = got[sel]
+        res[y0:y1, x0:x1] = region
+    return res, total
+
+
+def _inpaint_lama(bgr, mask, net, pad=32, device="cpu"):
+    """LaMa takes any size: pad to a multiple of 32 and crop the answer back."""
+    import torch
+
+    h, w = bgr.shape[:2]
+    ph, pw = (pad - h % pad) % pad, (pad - w % pad) % pad
+    img = cv2.copyMakeBorder(bgr, 0, ph, 0, pw, cv2.BORDER_REFLECT_101)
+    msk = cv2.copyMakeBorder(mask, 0, ph, 0, pw, cv2.BORDER_REFLECT_101)
+    rgb = img[:, :, ::-1].astype(np.float32) / 255.0
+    m = (msk > 127).astype(np.float32)
+    ti = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1)[None]))
+    tm = torch.from_numpy(np.ascontiguousarray(m[None, None]))
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = net(ti.to(device), tm.to(device))
+    ms = (time.perf_counter() - t0) * 1000.0
+    arr = (out[0].permute(1, 2, 0).cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+    got = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)[:h, :w]
+
+    res = bgr.copy()
+    sel = mask > 127
+    res[sel] = got[sel]
+    return res, ms
+
+
+def graft_hf(base, texture_src, mask, sigma=HF_SIGMA, strength=HF_STRENGTH):
+    """Put the source frame's high-frequency band back on a smooth repair.
+
+    Erase nets return a clean low-frequency patch with no pores, so their
+    texture lands near 0.45 where real skin sits at 0.90. The texture that
+    belongs there is still in the frame - only its low frequencies were
+    blemished - so transplant that band instead of asking a net to synthesise
+    one. `mask` gates it, so this stays a no-op outside the repaired patch.
+    """
+    a = (mask.astype(np.float32) / 255.0)[..., None] * float(strength)
+    low = cv2.GaussianBlur(base, (0, 0), sigma).astype(np.float32)
+    src = texture_src.astype(np.float32)
+    hf = src - cv2.GaussianBlur(src, (0, 0), sigma).astype(np.float32)
+    out = base.astype(np.float32) * (1.0 - a) + (low + hf) * a
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def engines_status(timeout: float = 0.4) -> dict:
+    """What each backend needs and whether it can run right now."""
+    report = {}
+    for name in ENGINES:
+        if name == "sdxl":
+            report[name] = {
+                "kind": "comfyui",
+                "ready": probe(timeout=timeout),
+                "detail": DEFAULT_URL,
+            }
+        else:
+            path = net_path(name)
+            ready = net_ready(name)
+            report[name] = {
+                "kind": "torchscript",
+                "ready": ready,
+                "path": path,
+                "detail": "" if ready else "weights missing, run tests/fetch_repaint_weights.py",
+            }
+    return report
 
 
 # ------------------------------------------------------------------ comfy client
@@ -302,49 +474,13 @@ def _plan(h: int, w: int, mask, tile: int):
     return [(y0, x0, count) for count, y0, x0 in candidates[:MAX_TILES]], skipped
 
 
-def apply(bgr, out, skin, info, params: dict, base_url: str = "",
-          timeout_per_tile: float = 300.0, mask=None) -> tuple:
-    """Run the repaint pass over `out` and return (image, stats).
-
-    `bgr` is the untouched source: the blemish mask is detected there, because
-    the CPU pipeline has already softened the spots and would under-report them.
-    `out` is the pipeline result and is what gets repainted, so the model starts
-    from clean skin instead of from the blemished pixels.
-    `info` is `skin_retouch`'s per-face report, used only for the face scale.
-    `mask` overrides the detector: tests feed a known ground truth through it,
-    and any future smarter detector plugs into the same place.
-    """
-    started = time.perf_counter()
-    base = (base_url or DEFAULT_URL).rstrip("/")
+def _apply_tiles(out, mask, stats: dict, base: str,
+                 timeout_per_tile: float, started: float):
+    """Sampling path: one ComfyUI request per tile that carries enough mask."""
     height, width = out.shape[:2]
-
-    face_px = 0
-    for item in info or []:
-        face_px = max(face_px, int(round(float(
-            item.get("face_px") or item.get("scale_px") or 0))))
-    if face_px <= 0:
-        face_px = max(8, min(height, width) // 8)
-
-    if mask is None:
-        mask, mask_stats = blemish_mask(
-            bgr, skin, face_px, blemish=float(params.get("blemish", 0.7)),
-            grow=GROW_PX, blur=BLUR_PX)
-    else:
-        mask = np.ascontiguousarray(np.asarray(mask, np.uint8))
-        mask_stats = {"raw_px": int((mask > 127).sum()), "thr": None}
     plan, skipped = _plan(height, width, mask, TILE)
-    stats = {
-        "available": True,
-        "tiles": len(plan),
-        "tiles_skipped": skipped,
-        "mask_px": int((mask > 127).sum()),
-        "mask_frac": round(float((mask > 127).mean()), 5),
-        "face_px": face_px,
-        "seed": int(params.get("repaint_seed", 0) or 1234),
-        "denoise": float(params.get("repaint_denoise", 0.60)),
-        "steps": int(params.get("repaint_steps", 8)),
-        **mask_stats,
-    }
+    stats["tiles"] = len(plan)
+    stats["tiles_skipped"] = skipped
     if not plan:
         stats["ms"] = round((time.perf_counter() - started) * 1000.0, 1)
         stats["note"] = "no blemish above threshold"
@@ -381,3 +517,97 @@ def apply(bgr, out, skin, info, params: dict, base_url: str = "",
     stats["per_tile"] = per_tile
     stats["ms"] = round((time.perf_counter() - started) * 1000.0, 1)
     return result, stats
+
+
+def _apply_nets(engine: str, out, mask, stats: dict, started: float):
+    """Erase-style path: one pass over the whole frame, no tiling, no sampler."""
+    net = load_net(engine, stats.get("device") or "cpu")
+    if engine == "migan":
+        repaired, net_ms = _inpaint_migan(out, mask, net)
+    else:
+        repaired, net_ms = _inpaint_lama(out, mask, net)
+    if stats.get("hf", 0) > 0:
+        repaired = graft_hf(repaired, out, mask, strength=stats["hf"])
+
+    # Feather the seam with the softened mask, then put every pixel the mask did
+    # not touch back verbatim. This is the property a sampling engine cannot
+    # offer, and the reason the surround stops looking grubby.
+    alpha = mask.astype(np.float32)[..., None] / 255.0
+    merged = np.clip(out.astype(np.float32) * (1.0 - alpha)
+                     + repaired.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+    keep = mask == 0
+    merged[keep] = out[keep]
+
+    stats["tiles"] = 1
+    stats["tiles_done"] = 1
+    stats["net_ms"] = round(net_ms, 1)
+    stats["ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+    return merged, stats
+
+
+def apply(bgr, out, skin, info, params: dict, base_url: str = "",
+          timeout_per_tile: float = 300.0, mask=None) -> tuple:
+    """Run the repaint pass over `out` and return (image, stats).
+
+    `bgr` is the untouched source: the blemish mask is detected there, because
+    the CPU pipeline has already softened the spots and would under-report them.
+    `out` is the pipeline result and is what gets repainted, so the model starts
+    from clean skin instead of from the blemished pixels.
+    `info` is `skin_retouch`'s per-face report, used only for the face scale.
+    `mask` overrides the detector: tests feed a known ground truth through it,
+    and any future smarter detector plugs into the same place.
+
+    `params["repaint_engine"]` picks the backend. Two of them are local
+    TorchScript graphs that keep every pixel outside the mask bit-identical;
+    "sdxl" is the original ComfyUI sampler, kept for comparison.
+    """
+    started = time.perf_counter()
+    base = (base_url or DEFAULT_URL).rstrip("/")
+    height, width = out.shape[:2]
+
+    engine = str(params.get("repaint_engine") or DEFAULT_ENGINE).strip().lower()
+    if engine not in ENGINES:
+        engine = DEFAULT_ENGINE
+
+    face_px = 0
+    for item in info or []:
+        face_px = max(face_px, int(round(float(
+            item.get("face_px") or item.get("scale_px") or 0))))
+    if face_px <= 0:
+        face_px = max(8, min(height, width) // 8)
+
+    if mask is None:
+        mask, mask_stats = blemish_mask(
+            bgr, skin, face_px, blemish=float(params.get("blemish", 0.7)),
+            grow=GROW_PX, blur=BLUR_PX)
+    else:
+        mask = np.ascontiguousarray(np.asarray(mask, np.uint8))
+        mask_stats = {"raw_px": int((mask > 127).sum()), "thr": None}
+
+    stats = {
+        "available": True,
+        "engine": engine,
+        "mask_px": int((mask > 127).sum()),
+        "mask_frac": round(float((mask > 127).mean()), 5),
+        "face_px": face_px,
+        **mask_stats,
+    }
+    if engine == "sdxl":
+        stats.update({
+            "seed": int(params.get("repaint_seed", 0) or 1234),
+            "denoise": float(params.get("repaint_denoise", 0.60)),
+            "steps": int(params.get("repaint_steps", 8)),
+        })
+    else:
+        stats.update({"hf": float(params.get("repaint_hf", HF_STRENGTH)),
+                      "device": "cpu"})
+
+    if not (mask > 127).any():
+        stats["tiles"] = 0
+        stats["ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+        stats["note"] = "no blemish above threshold"
+        return out, stats
+
+    if engine == "sdxl":
+        return _apply_tiles(out, mask, stats, base, timeout_per_tile, started)
+    return _apply_nets(engine, out, mask, stats, started)

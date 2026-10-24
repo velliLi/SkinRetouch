@@ -75,17 +75,27 @@ PARAM_SPECS = [
     {
         "key": "repaint", "label": "局部重绘", "kind": "bool", "group": "重绘",
         "default": False,
-        "hint": "用本地 inpaint 模型把痘点真正重画一遍，而不是抹平。每块约 10 秒，需要 ComfyUI 在线。",
+        "hint": "把痘点真正擦掉并补一块新皮肤，而不是抹平。migan 引擎约 3 秒，不需要 ComfyUI。",
+    },
+    {
+        "key": "repaint_engine", "label": "重绘引擎", "kind": "enum", "group": "重绘",
+        "default": "migan", "options": ["migan", "lama", "sdxl"],
+        "hint": "migan 25.8 MB / 3 秒；lama 196 MB / 6.5 秒更稳；sdxl 6.9 GB / 2 分钟，会重画整片皮肤。",
+    },
+    {
+        "key": "repaint_hf", "label": "纹理回贴", "kind": "float", "group": "重绘",
+        "default": 1.15, "min": 0.0, "max": 2.0, "step": 0.05,
+        "hint": "migan/lama 只补低频、没有毛孔，把原图的高频带贴回来。0 关闭，1.15 实测最接近真皮肤。",
     },
     {
         "key": "repaint_denoise", "label": "重绘强度", "kind": "float", "group": "重绘",
         "default": 0.60, "min": 0.30, "max": 1.0, "step": 0.05,
-        "hint": "实测 0.35~1.0 差异很小，0.6 是平衡点；调高只增加离开原图的自由度。",
+        "hint": "仅 sdxl 引擎使用。实测 0.35~1.0 差异很小，0.6 是平衡点。",
     },
     {
         "key": "repaint_steps", "label": "重绘步数", "kind": "int", "group": "重绘",
         "default": 8, "min": 4, "max": 30, "step": 1,
-        "hint": "8 步与 20 步结果几乎相同但快一倍多，只有在细节糊掉时才往上加。",
+        "hint": "仅 sdxl 引擎使用。8 步与 20 步结果几乎相同但快一倍多。",
     },
     {
         "key": "device", "label": "计算设备", "kind": "enum", "group": "性能",
@@ -190,6 +200,9 @@ class Config:
     # Where the optional repaint pass looks for ComfyUI. Empty means "use
     # server.repaint.DEFAULT_URL", which honours SKIN_REPAINT_URL.
     repaint_url: str = ""
+    # Where migan_traced.pt and big-lama.pt live. Empty means
+    # `<repo>/models/repaint`, overridable with SKIN_REPAINT_MODELS.
+    repaint_models: str = ""
     # Keeping the engine warm. `repaint_autostart` spawns a private ComfyUI when
     # nothing answers on `repaint_url`; an instance the user already runs is
     # reused and never taken over.

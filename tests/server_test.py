@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
+from server import repaint  # noqa: E402
 from server.api import create_server  # noqa: E402
 from server.config import Config, PARAM_KEYS  # noqa: E402
 
@@ -130,6 +131,15 @@ def main():
         check("health reports the repaint engine",
               isinstance((body.get("repaint") or {}).get("available"), bool),
               body.get("repaint"))
+        engines = body.get("engines") or {}
+        check("health lists every repaint engine",
+              set(engines) == set(repaint.ENGINES), sorted(engines))
+        check("health marks each engine ready or not",
+              all(isinstance(info.get("ready"), bool) for info in engines.values()),
+              engines)
+        check("local engines report where their weights live",
+              all(engines[name]["path"].endswith(repaint.NET_FILES[name])
+                  for name in repaint.NET_FILES), engines)
 
         # -- schema and static assets --------------------------------------
         status, _, raw = call(base, "/api/schema")

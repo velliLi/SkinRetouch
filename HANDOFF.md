@@ -99,11 +99,23 @@ $env:SKIN_DEVICE="cuda"   # 或 cpu
 - **小掩膜不会**：稀疏痘点掩膜（覆盖 1.4%）分块重绘后，接缝梯度与坏图逐位相同（3.6150 vs 3.6172），掩膜外像素逐字节不变（`tests/repaint_test.py` 断言 `changed_outside == 0`），发丝一根没断。
 - **收益有据**：先用 `skin_retouch` 磨皮、再补一过重绘，瑕疵区残差 6.20 → 4.53、高频能量 6.57 → 4.44（真值掩膜，`tests/probe_hit_check.py`）。
 
-落地形态：网页服务的 `repaint` 开关，默认 `False`，只在 CPU 磨皮之后追加一过，掩膜由 `server/repaint.py` 自动检测（红通道窄带通 + 分位阈值）。**ComfyUI 不在线就跳过并写警告，绝不让任务失败。**
+落地形态：网页服务的 `repaint` 开关，默认 `False`，只在 CPU 磨皮之后追加一过，掩膜由 `server/repaint.py` 自动检测（红通道窄带通 + 分位阈值）。**引擎不可用就跳过并写警告，绝不让任务失败。**
 
-引擎由 `server/engine.py` 管理，服务启动时自动待命（`--repaint-autostart`，默认开）：`repaint_url`（默认 `http://127.0.0.1:8188`，ComfyUI 的默认端口）上已有实例就直接复用、绝不接管也不关闭；没有才 spawn 私有 ComfyUI（`--comfyui-dir` / `--comfyui-python` 可指定），日志落 `<data-dir>/comfyui.log`，服务退出时一并回收。页面「重绘」组标题旁有状态点与启停按钮，走 `GET|POST /api/repaint/engine`；`start` 立刻返回 `starting`，前端轮询到 `ready`。实测待命 27.2 秒（含 6.9 GB checkpoint 加载），stop/start 往返 22.6 秒，单块重绘首块约 33 秒、后续 12–24 秒。**不能用 `Popen` 之外的粗暴方式杀 ComfyUI**：`stop()` 只在 `managed`（自己 spawn 的）为真时动手，否则显示「占用中」。
+**1.1 默认引擎是擦除式的 `migan`，不是 SDXL。** 用户反馈"重绘会在皮肤表面生成斑点"，实测复现了这个症状的成因——不是模型画了脏东西，是**采样式 inpaint 把掩膜内的高频洗掉了**：同一张测试图同一个掩膜，`sdxl` 把掩膜内的高频能量从输入时的 4.15 压到 3.00（−28%），掩膜里只剩它自己编的低频起伏，和旁边真皮肤并置就是"起了一层"。`migan`/`lama` 是擦除式（只输出被擦掉那块的低频填补），不洗高频，实测保留 4.28/4.30。成本差距同样离谱：
 
-**目前最大的空白：人脸身份漂移没有量化。** 本机 `~/.insightface/models` 为空（无 ArcFace 权重）、也没有 `lpips`/`pyiqa`，只有"掩膜外漂移 4.06 ≈ 纯 VAE 往返误差"这个代理证据，和 5 倍放大图的肉眼判断。要下"重绘不会改身份"的结论，得先补测量手段。
+| 引擎 | 权重 | 一张 896×1152 | 依赖 |
+|---|---|---|---|
+| `migan`（默认） | 25.8 MB | 3.1 秒 | 只要 torch |
+| `lama` | 196 MB | 8.5 秒 | 只要 torch |
+| `sdxl` | 6.9 GB | 171 秒 | ComfyUI 实例 |
+
+**1.2 擦除式模型的毛孔得从原图搬回来。** `migan`/`lama` 输出的那块是干净但无纹理的低频。真实纹理本来就在原图里（瑕疵只污染低频，高频是好的），所以 `graft_hf` 把 `src − GaussianBlur(src, 2.5)` 按掩膜 alpha 叠回去，比让模型凭空合成可控。`repaint_hf` 默认 1.15：`migan` 不回贴时 `tex`（掩膜内/环带高频比）只有 0.45，1.0 倍到 0.78，1.15 倍到 0.88，对齐 `retouch` 的 0.93 与干净原图的 0.90；1.3 倍就过冲成 0.99、`spk_rat` 到 1.00（等于自己造纹理），所以别调过 1.2。**别在大掩膜上用这三个引擎**：33% 皮肤掩膜下 `migan`/`lama` 把光照梯度压平（同一张脸两块区域均值差 33/26 灰阶），`sdxl` 保色调但纹理压到 0.845 且耗时 363 秒。
+
+**1.3 权重不进仓库。** `models/repaint/{migan_traced.pt,big-lama.pt}` 由 `tests/fetch_repaint_weights.py` 按需下载（多镜像测速 + 2 MB 分片 + MD5 校验 + `.progress` 断点续传），目录可用 `--repaint-models` 或 `SKIN_REPAINT_MODELS` 覆盖。缺权重时页面圆点灰着、勾选被跳过、meta 写明原因。**网络前提已被更正**：之前记录的"外网全断"是 `curl` 的 Schannel 伪失败误判，python urllib 实测 github / hf-mirror / modelscope 都通，只有 `huggingface.co` 直连超时。
+
+**1.4 SDXL 引擎与它的 ComfyUI 依赖仍然保留**（`repaint_engine=sdxl` 时才有用）。引擎由 `server/engine.py` 管理，服务启动时自动待命（`--repaint-autostart`，默认开）：`repaint_url`（默认 `http://127.0.0.1:8188`，ComfyUI 的默认端口）上已有实例就直接复用、绝不接管也不关闭；没有才 spawn 私有 ComfyUI（`--comfyui-dir` / `--comfyui-python` 可指定），日志落 `<data-dir>/comfyui.log`，服务退出时一并回收。页面「重绘」组标题旁有状态点与启停按钮，走 `GET|POST /api/repaint/engine`；`start` 立刻返回 `starting`，前端轮询到 `ready`。实测待命 27.2 秒（含 6.9 GB checkpoint 加载），stop/start 往返 22.6 秒。**不能用 `Popen` 之外的粗暴方式杀 ComfyUI**：`stop()` 只在 `managed`（自己 spawn 的）为真时动手，否则显示「占用中」。
+
+**目前最大的空白：人脸身份漂移没有量化。** 本机 `~/.insightface/models` 为空（无 ArcFace 权重）、也没有 `lpips`/`pyiqa`，只有"掩膜外漂移 4.06 ≈ 纯 VAE 往返误差"这个代理证据，和 5 倍放大图的肉眼判断。要下"重绘不会改身份"的结论，得先补测量手段。`migan`/`lama` 不碰掩膜外、掩膜内也不重画五官，风险比 SDXL 低得多，但依然没有量化。
 
 **2. 不用 mediapipe / face mesh。**
 本机 `mediapipe 0.10.14` 配 `protobuf 5.29.5` 初始化即崩溃，`FaceDetection` 与 `FaceMesh` 都一样：
@@ -299,7 +311,7 @@ CPU，含检测的稳态耗时。耗时跟着**人脸像素尺寸**走，不跟�
 
 节点面向 `face_confidence` / `body_strength=0.0 表示跟随 strength`，而 `skin_core.skin_retouch()` 收 `conf` / `body_strength=None`。转换只在 `server/jobs.py:core_kwargs()` 里做一次，别在别处重复。
 
-`server/config.py:PARAM_SPECS` 是 13 个参数的单一事实源（label、范围、步长、中文说明、分组），`/api/schema` 直接把这张表给前端，前端按 `kind` 分派成滑杆 / 开关 / 分段控件。加参数就改这一处，前后端都会跟上。
+`server/config.py:PARAM_SPECS` 是 15 个参数的单一事实源（label、范围、步长、中文说明、分组），`/api/schema` 直接把这张表给前端，前端按 `kind` 分派成滑杆 / 开关 / 分段控件。加参数就改这一处，前后端都会跟上。
 
 ### 严格性：宁可报错也不静默
 
@@ -390,8 +402,8 @@ E:\SkinRetouch\
     blemish_test.py      注入瑕疵再还原，CPU 脸路径回归基线（带断言）
     node_test.py         节点输入输出契约
     compare_paths.py     CPU / GPU 两条路径的一致性预算
-    server_test.py       本地服务 HTTP 端到端自检（58 项断言，随机端口自起自停）
-    repaint_test.py      局部重绘自检（15 项断言，引擎不在线时跳过在线部分）
+    server_test.py       本地服务 HTTP 端到端自检（61 项断言，随机端口自起自停）
+    repaint_test.py      局部重绘自检（30 项断言，三个引擎各跑一遍，权重不在时跳过对应引擎）
     service_test.py      一键开关起停自检（37 项断言，临时数据目录里真起真杀）
     deliver_demo.py      成品对比图
     probe_body_final.py  20 MP 端到端，出 final_out_/final_mask_/final_side_
@@ -410,7 +422,7 @@ E:\SkinRetouch\
     config.py            PARAM_SPECS 参数表、PRESETS、Config、令牌与参数校验
     store.py             任务落盘、magic bytes 嗅探扩展名、TTL 清理
     jobs.py              单 worker 串行队列、core_kwargs 参数映射、PNG/JPEG 编码、meta.json
-    repaint.py           SDXL 9 通道 inpaint 客户端：掩膜检测、分块规划、alpha 融合、降级
+    repaint.py           重绘层：掩膜检测、三引擎（migan/lama 走本地 TorchScript、sdxl 走 ComfyUI）、高频回贴、融合、降级
     engine.py            重绘引擎的生死：探活、复用外部实例、按需拉起私有 ComfyUI、退出回收
     api.py               http.server 路由、鉴权、CORS、三种上传体、SSE、引擎启停
     webui/               index.html / app.css / app.js / favicon.svg（无构建步骤）

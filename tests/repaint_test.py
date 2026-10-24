@@ -121,23 +121,28 @@ def make_case():
     return blemished, out, skin, info
 
 
-def test_live(url):
-    print("\n[live repaint against %s]" % url)
+def test_live(url, engine="sdxl"):
+    print("\n[live repaint: %s]" % engine)
     blemished, out, skin, info = make_case()
     mask, mask_stats = repaint.blemish_mask(blemished, skin, int(info[0]["face_px"]))
     covered = int((mask > 127).sum())
     check("blemish_mask finds the painted spots", covered > 0,
           (covered, mask_stats))
 
+    params = {"blemish": 0.7, "repaint_engine": engine}
+    if engine == "sdxl":
+        params.update({"repaint_denoise": 0.6, "repaint_steps": 8})
+    else:
+        params["repaint_hf"] = 1.15
+
     try:
-        result, stats = repaint.apply(blemished, out, skin, info,
-                                      {"blemish": 0.7, "repaint_denoise": 0.6,
-                                       "repaint_steps": 8}, base_url=url,
-                                      timeout_per_tile=300.0)
+        result, stats = repaint.apply(blemished, out, skin, info, params,
+                                      base_url=url, timeout_per_tile=300.0)
     except repaint.RepaintError as exc:
         check("apply runs against a live engine", False, exc)
         return
 
+    check("apply honours the requested engine", stats.get("engine") == engine, stats)
     check("apply reports tiles", stats.get("tiles_done", 0) >= 1, stats)
     check("apply reports timing", isinstance(stats.get("ms"), float), stats.get("ms"))
 
@@ -176,10 +181,18 @@ def main(argv=None):
     test_mask_helpers()
 
     url = (args.url or repaint.DEFAULT_URL).rstrip("/")
+    # The two TorchScript nets need only their weight file, so they are checked
+    # whenever the weights are present. SDXL still needs a ComfyUI instance.
+    for engine in ("migan", "lama"):
+        if repaint.net_ready(engine):
+            test_live("", engine)
+        else:
+            skip("live repaint (%s)" % engine,
+                 "weights missing at %s" % repaint.net_path(engine))
     if repaint.probe(url, timeout=1.0):
-        test_live(url)
+        test_live(url, "sdxl")
     else:
-        skip("live repaint", "no ComfyUI on %s" % url)
+        skip("live repaint (sdxl)", "no ComfyUI on %s" % url)
 
     print()
     if failures:

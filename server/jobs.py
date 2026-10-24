@@ -343,28 +343,41 @@ class JobManager:
     def _repaint(self, job: Job, bgr, out, mask, info):
         """Run the optional repaint pass; always returns a usable image.
 
-        Failure modes are reported, not raised: an unreachable ComfyUI, a model
-        that is not installed, a tile that times out. The caller keeps the
+        Failure modes are reported, not raised: a missing weight file, an
+        unreachable ComfyUI, a tile that times out. The caller keeps the
         pipeline result and the reason shows up in `job.repaint` and in the
         snapshot's warnings, which the UI surfaces as a toast.
         """
         base = self.cfg.repaint_url or repaint.DEFAULT_URL
-        if not repaint.probe(base):
-            job.repaint = {"available": False, "url": base,
+        engine = str(job.params.get("repaint_engine") or repaint.DEFAULT_ENGINE).lower()
+        if engine not in repaint.ENGINES:
+            engine = repaint.DEFAULT_ENGINE
+
+        if engine == "sdxl" and not repaint.probe(base):
+            job.repaint = {"available": False, "engine": engine, "url": base,
                            "reason": "no ComfyUI answering on %s" % base}
             job.warnings.append("局部重绘已跳过：%s 上没有可用的 ComfyUI 实例" % base)
             self._log("job %s repaint skipped: %s unreachable" % (job.id, base))
             return out
+        if engine != "sdxl" and not repaint.net_ready(engine):
+            where = repaint.net_path(engine)
+            job.repaint = {"available": False, "engine": engine, "reason": where}
+            job.warnings.append(
+                "局部重绘已跳过：%s 引擎的权重不在 %s，先跑 tests/fetch_repaint_weights.py"
+                % (engine, where))
+            self._log("job %s repaint skipped: %s weights missing" % (job.id, engine))
+            return out
+
         try:
             image, stats = repaint.apply(bgr, out, mask, info, job.params, base_url=base)
         except repaint.RepaintError as exc:
-            job.repaint = {"available": True, "url": base, "reason": str(exc)}
+            job.repaint = {"available": True, "engine": engine, "reason": str(exc)}
             job.warnings.append("局部重绘失败，已回退到磨皮结果：%s" % (exc,))
             self._log("job %s repaint failed: %s" % (job.id, exc))
             return out
         job.repaint = stats
-        self._log("job %s repaint: %d tile(s) in %.0f ms, mask %.2f%%"
-                  % (job.id, stats.get("tiles_done", 0), stats.get("ms", 0.0),
+        self._log("job %s repaint[%s]: %.0f ms, mask %.2f%%"
+                  % (job.id, stats.get("engine", engine), stats.get("ms", 0.0),
                      100.0 * stats.get("mask_frac", 0.0)))
         return image
 

@@ -470,10 +470,12 @@ class Handler(BaseHTTPRequestHandler):
             "authorized": authorized,
         }
         if authorized:
+            probe = self.server.repaint_probe()  # type: ignore[attr-defined]
             payload.update({
                 "caps": self.server.caps(),  # type: ignore[attr-defined]
                 "queue": self.manager.stats(),
-                "repaint": self.server.repaint_probe(),  # type: ignore[attr-defined]
+                "repaint": probe["status"],
+                "engines": probe["engines"],
                 "uptime_s": round(time.time() - self.server.started_at, 1),  # type: ignore[attr-defined]
                 "preview_max_px": self.cfg.preview_max_px,
                 "limits": {
@@ -705,17 +707,23 @@ class SkinHTTPServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
 
     def repaint_probe(self) -> dict:
-        """Reachability of the optional repaint engine, cached for a few seconds.
+        """Reachability of every repaint backend, cached for a few seconds.
 
-        Deliberately not part of `caps()`: that cache never expires, while
-        ComfyUI is something the user starts and stops during a session. The
-        timeout is short because this rides on the health endpoint the page
-        polls.
+        Deliberately not part of `caps()`: that cache never expires, while the
+        engines come and go during a session - a weight file can be fetched, and
+        ComfyUI is something the user starts and stops. The timeout is short
+        because this rides on the health endpoint the page polls.
+
+        Two shapes come back: `_repaint_probe["status"]` is the ComfyUI process
+        the start/stop chip drives, and `["engines"]` tells the page which of
+        migan / lama / sdxl can actually run right now.
         """
         now = time.time()
         if now - self._repaint_probe["at"] > 3.0:
-            self._repaint_probe = {"at": now, "status": self.engine.status()}
-        return dict(self._repaint_probe["status"])
+            self._repaint_probe = {"at": now, "status": self.engine.status(),
+                                   "engines": repaint.engines_status(timeout=0.4)}
+        return {"status": dict(self._repaint_probe["status"]),
+                "engines": dict(self._repaint_probe["engines"])}
 
     def caps(self) -> dict:
         """Environment facts the UI shows in the footer; probed once."""
@@ -754,6 +762,8 @@ class SkinHTTPServer(ThreadingHTTPServer):
 
 def create_server(cfg: Config, log=None):
     log = log or (lambda message: print(message, flush=True))
+    if cfg.repaint_models:
+        repaint.MODEL_DIR = cfg.repaint_models
     store = JobStore(cfg.resolved_data_dir())
     manager = JobManager(cfg, store, log)
     engine = Engine(

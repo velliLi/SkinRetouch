@@ -315,6 +315,8 @@ def start(args) -> int:
     # `服务开关.bat` users able to reclaim the VRAM without editing anything.
     if args.repaint_url:
         argv += ["--repaint-url", args.repaint_url.rstrip("/")]
+    if args.repaint_models:
+        argv += ["--repaint-models", args.repaint_models]
     if not args.repaint_autostart:
         argv += ["--no-repaint-autostart"]
     if args.comfyui_dir:
@@ -525,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true", help="pass --verbose to the server")
     parser.add_argument("--repaint-url", default="",
                         help="ComfyUI base URL for the optional repaint pass")
+    parser.add_argument("--repaint-models", default="",
+                        help="directory holding migan_traced.pt / big-lama.pt")
     parser.add_argument("--no-repaint-autostart", action="store_false", dest="repaint_autostart",
                         help="do not keep a ComfyUI waiting for the repaint pass "
                              "(saves ~2 GB of VRAM, the page can still start it)")

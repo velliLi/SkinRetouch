@@ -205,6 +205,7 @@
     }
     state.health = health;
     state.repaint = health.repaint || null;
+    state.engines = health.engines || {};
     el.chipVersion.textContent = "v" + (health.version || "—");
 
     if (health.auth_required && !health.authorized) {
@@ -229,7 +230,8 @@
       caps.opencv ? "cv2 " + caps.opencv : "",
       caps.models && caps.models.face ? "face✓" : "",
       caps.models && caps.models.person ? "person✓" : "",
-      health.repaint && health.repaint.available ? "inpaint✓" : "",
+      health.engines && Object.keys(health.engines).some((k) => health.engines[k].ready)
+        ? "inpaint✓" : "",
     ]
       .filter(Boolean)
       .join(" · ");
@@ -248,32 +250,48 @@
     return true;
   }
 
-  // The repaint switch must be honest about the engine behind it. When ComfyUI
-  // is not running there is nothing to redraw with, and a ticked box that
-  // silently does nothing is the worst possible outcome -- so the row says so
-  // before the job is submitted, and the job's own warning says it again.
+  // The repaint switch must be honest about the engine behind it. Two of the
+  // three backends need nothing but a weight file, so they are normally ready;
+  // "sdxl" needs a ComfyUI that the user starts and stops. A ticked box that
+  // silently does nothing is the worst possible outcome, so the row says what
+  // is wrong before the job is submitted and the job warning says it again.
+  function currentEngine() {
+    const want = (state.params && state.params.repaint_engine) || "migan";
+    const engines = state.engines || {};
+    return { name: want, info: engines[want] || {} };
+  }
+
   function noteRepaint() {
     const row = el.params.querySelector('[data-key="repaint"]');
     if (!row) return;
-    const engine = state.repaint || {};
-    const available = !!engine.available;
+    const { name, info } = currentEngine();
+    const available = !!info.ready;
     row.dataset.unavailable = available ? "0" : "1";
     const hint = row.querySelector(".param-hint");
     if (hint) {
       if (available) {
-        hint.textContent = "把痘点真正重画一遍而不是抹平，每块约 10 秒。与磨皮叠加效果最好。";
-      } else if (engine.state === "starting") {
-        hint.textContent = "引擎正在启动，模型加载完就能勾选。";
+        const cost = name === "migan" ? "约 3 秒" : name === "lama" ? "约 7 秒" : "约 2 分钟";
+        hint.textContent = `用 ${name} 把痘点擦掉再补一块新皮肤，${cost}。与磨皮叠加效果最好。`;
+      } else if (name === "sdxl") {
+        const engine = state.repaint || {};
+        hint.textContent = engine.state === "starting"
+          ? "SDXL 引擎正在启动，模型加载完就能勾选。"
+          : "SDXL 引擎未就绪："
+            + (engine.spawnable === false
+              ? (engine.detail || "找不到 ComfyUI，用 --comfyui-dir 指定")
+              : (engine.url || "ComfyUI") + " 上没有响应，可点上方「启动」。");
       } else {
-        hint.textContent = "引擎未就绪："
-          + (engine.spawnable === false
-            ? (engine.detail || "找不到 ComfyUI，用 --comfyui-dir 指定")
-            : (engine.url || "ComfyUI") + " 上没有响应，可点上方「启动」。");
+        hint.textContent = `${name} 权重缺失：`
+          + (info.detail || "先跑 tests/fetch_repaint_weights.py");
       }
     }
-    for (const key of ["repaint_denoise", "repaint_steps"]) {
+    // repaint_hf only exists for the erase nets, denoise/steps only for the
+    // sampler. Greying the irrelevant ones keeps the panel from lying.
+    for (const key of ["repaint_hf", "repaint_denoise", "repaint_steps"]) {
       const other = el.params.querySelector(`[data-key="${key}"]`);
-      if (other) other.dataset.unavailable = available ? "0" : "1";
+      if (!other) continue;
+      const irrelevant = key === "repaint_hf" ? name === "sdxl" : name !== "sdxl";
+      other.dataset.unavailable = (irrelevant || !available) ? "1" : "0";
     }
     renderEngine();
   }
@@ -303,6 +321,13 @@
   function renderEngine() {
     const wrap = engineUI.node;
     if (!wrap) return;
+    // Only the sampler backend has a process to start or stop. The local nets
+    // are just a weight file, so showing a start button for them would be a lie.
+    if (currentEngine().name !== "sdxl") {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
     const engine = state.repaint || {};
     const key = engine.available ? "ready" : (engine.state || "idle");
     wrap.dataset.state = key;
@@ -549,6 +574,9 @@
         state.params[spec.key] = option;
         markPreset("");
         paintRow(spec, wrap);
+        // Switching backends changes what is available and which sub-parameters
+        // mean anything, so re-run the honesty pass.
+        if (spec.key === "repaint_engine") noteRepaint();
       });
       seg.appendChild(btn);
     }
@@ -708,8 +736,11 @@
     state.jobId = submitted.id;
     trackJob(submitted);
     poll();
-    if (state.params.repaint && !(state.repaint && state.repaint.available)) {
-      toast("局部重绘引擎未就绪，本次只做磨皮。", "info", 6000);
+    if (state.params.repaint) {
+      const { name, info } = currentEngine();
+      if (!info.ready) {
+        toast(`${name} 重绘引擎未就绪，本次只做磨皮。`, "info", 6000);
+      }
     }
   }
 
@@ -912,7 +943,9 @@
     const note = [];
     if (snapshot.queue_position > 0) note.push("队列第 " + snapshot.queue_position + " 位");
     else if (snapshot.status === "running") {
-      note.push(phase === "repaint" ? "局部重绘中，每块约 10 秒" : "单张串行处理");
+      const per = (snapshot.params && snapshot.params.repaint_engine) === "sdxl"
+        ? "每块约 10 秒" : "整图一次";
+      note.push(phase === "repaint" ? `局部重绘中，${per}` : "单张串行处理");
     }
     el.busyNote.textContent = note.join(" · ");
     // Only a still-queued job can actually be pulled; the pipeline has no
@@ -1015,9 +1048,11 @@
     ];
     const repaint = snapshot.repaint || {};
     if (Number.isFinite(Number(timing.repaint_ms))) {
-      stats.push(["局部重绘", fmtMs(timing.repaint_ms)]);
+      stats.push(["局部重绘", fmtMs(timing.repaint_ms)
+        + (repaint.engine ? " · " + repaint.engine : "")]);
+      const frac = ((Number(repaint.mask_frac) || 0) * 100).toFixed(2);
       stats.push(["重绘区域", repaint.tiles_done
-        ? `${repaint.tiles_done} 块 · ${((Number(repaint.mask_frac) || 0) * 100).toFixed(2)} %`
+        ? (repaint.engine === "sdxl" ? `${repaint.tiles_done} 块 · ${frac} %` : `${frac} %`)
         : (repaint.reason || "无瑕疵超过阈值")]);
     } else if (repaint.reason) {
       stats.push(["局部重绘", repaint.reason]);

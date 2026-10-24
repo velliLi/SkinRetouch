@@ -8,8 +8,9 @@ Everything goes through `/api/jobs` exactly as the browser does it, so this
 also exercises the wiring `server_test.py` cannot show: the numbers in
 `REPAINT_EXPLORE.md` prove the engine works, this proves the *feature* works.
 
-    python tests/probe_web_repaint.py
-    python tests/probe_web_repaint.py --url http://127.0.0.1:8189 --asset t07_...
+    python tests/probe_web_repaint.py                       # default migan engine
+    python tests/probe_web_repaint.py --repaint-engine lama
+    python tests/probe_web_repaint.py --repaint-engine sdxl --url http://127.0.0.1:8188
 """
 
 import argparse
@@ -79,14 +80,21 @@ def fetch(base, job_id, kind="out"):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--asset", default="t01_headshoulders_135_00001_.png")
-    parser.add_argument("--url", default="", help="ComfyUI base URL")
+    parser.add_argument("--url", default="", help="ComfyUI base URL (sdxl only)")
+    parser.add_argument("--repaint-engine", default=repaint.DEFAULT_ENGINE,
+                        choices=list(repaint.ENGINES))
     parser.add_argument("--crop", type=int, default=260, help="crop side in pixels")
     parser.add_argument("--zoom", type=int, default=4)
     args = parser.parse_args(argv)
 
-    engine = (args.url or repaint.DEFAULT_URL).rstrip("/")
-    if not repaint.probe(engine, timeout=1.0):
-        raise SystemExit("no ComfyUI on %s; start it first" % engine)
+    engine = args.repaint_engine
+    if engine == "sdxl":
+        if not repaint.probe((args.url or repaint.DEFAULT_URL).rstrip("/"), timeout=1.0):
+            raise SystemExit("no ComfyUI for the sdxl engine; start it first")
+    elif not repaint.net_ready(engine):
+        raise SystemExit("%s weights missing; run tests/fetch_repaint_weights.py "
+                         "--model %s" % (engine, engine))
+    url = (args.url or repaint.DEFAULT_URL).rstrip("/")
 
     clean = cv2.imread(os.path.join(ASSETS, args.asset), cv2.IMREAD_COLOR)
     if clean is None:
@@ -106,7 +114,7 @@ def main(argv=None):
 
     data_dir = tempfile.mkdtemp(prefix="skin-web-")
     cfg = Config(host="127.0.0.1", port=0, token="", data_dir=data_dir,
-                 preview_max_px=2400, repaint_url=engine)
+                 preview_max_px=2400, repaint_url=url)
     server = create_server(cfg)
     threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2},
                      daemon=True).start()
@@ -114,8 +122,9 @@ def main(argv=None):
     print("console %s  engine %s" % (base, engine))
 
     try:
-        plain = submit(base, blob, "?include_body=0&strength=0.75&blemish=0.7")
-        plus = submit(base, blob, "?include_body=0&strength=0.75&blemish=0.7&repaint=1")
+        query = "?include_body=0&strength=0.75&blemish=0.7&repaint_engine=" + engine
+        plain = submit(base, blob, query)
+        plus = submit(base, blob, query + "&repaint=1")
         out_plain = fetch(base, plain["id"])
         out_plus = fetch(base, plus["id"])
     finally:
@@ -172,9 +181,10 @@ def main(argv=None):
         label(zoom(out_plus), "retouch+repaint"),
     ]
     sheet = np.hstack(panels)
-    cv2.imwrite(os.path.join(OUT, "web_repaint_compare.png"), sheet)
+    sheet_name = "web_repaint_compare_%s.png" % engine
+    cv2.imwrite(os.path.join(OUT, sheet_name), sheet)
 
-    path = os.path.join(OUT, "web_repaint_report.json")
+    path = os.path.join(OUT, "web_repaint_report_%s.json" % engine)
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
 
@@ -185,7 +195,7 @@ def main(argv=None):
     print("hf     clean %-6s blemished %-6s retouch %-6s retouch+repaint %s"
           % (report["clean_hf"], report["blemished"]["hf"], report["retouch"]["hf"],
              report["retouch_repaint"]["hf"]))
-    print("wrote %s" % os.path.join(OUT, "web_repaint_compare.png"))
+    print("wrote %s" % os.path.join(OUT, sheet_name))
     return 0
 
 

@@ -12,6 +12,12 @@ __pycache__/
 models/*.pt
 models/*.onnx
 models/*.pth
+models/**/*.pt
+models/**/*.onnx
+models/**/*.pth
+# 断点续传的进度日志，下载完就该消失
+models/**/*.progress
+models/**/*.part
 
 # 测试产物与中间图
 tests/output/
